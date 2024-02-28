@@ -1,0 +1,39 @@
+{
+  "name": "chatgpt-proxy",
+  "version": "1.0.0",
+  "description": "",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "clean": "rimraf ./build",
+    "build": "npm-run-all format clean && tsc",
+    "start": "npm run build && node build/index.js",
+    "local": "tsx src/index.ts",
+    "local:watch": "nodemon --exec npm run local",
+    "lint": "eslint src",
+    "format": "npx prettier --write src",
+    "format:check": "npx prettier --check src",
+    "docker": "docker build -t gsbelarus/chatgpt-proxy . && docker push gsbelarus/chatgpt-proxy"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/node": "^20.11.19",
+    "@typescript-eslint/eslint-plugin": "^7.0.2",
+    "@typescript-eslint/parser": "^7.0.2",
+    "eslint": "^8.57.0",
+    "eslint-config-prettier": "^9.1.0",
+    "nodemon": "^3.1.0",
+    "npm-run-all": "^4.1.5",
+    "prettier": "^3.2.5",
+    "rimraf": "^5.0.5",
+    "tsx": "^4.7.1",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "chatgpt": "^5.2.5",
+    "dotenv": "^16.4.5"
+  }
+}
