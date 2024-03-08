@@ -30,13 +30,13 @@ function isChatGPTRequest(object) {
         object !== null &&
         "prompt" in object &&
         typeof object.prompt === "string" &&
-        "securityKey" in object &&
-        typeof object.securityKey === "string" &&
-        (object.role === undefined || typeof object.role === "string") &&
+        "security_key" in object &&
+        typeof object.security_key === "string" &&
         (object.model === undefined || typeof object.model === "string") &&
-        (object.schema === undefined || typeof object.schema === "string") &&
         (object.temperature === undefined ||
-            (typeof object.temperature === "number" && object.temperature > 0)) &&
+            (typeof object.temperature === "number" &&
+                object.temperature >= 0 &&
+                object.temperature <= 2)) &&
         (object.top_p === undefined ||
             (typeof object.top_p === "number" &&
                 object.top_p >= 0 &&
@@ -47,12 +47,33 @@ export const server = http.createServer(async (req, res) => {
         res.writeHead(200, { "Content-Type": "text/html" });
         res.end("<h1>Hello, World!</h1>");
     }
+    else if (req.url === "/health") {
+        try {
+            const chatAPI = new ChatGPTAPI({
+                apiKey: process.env.OPENAI_API_KEY,
+                apiBaseUrl: "https://api.openai.com/v1",
+                completionParams: {
+                    model: "gpt-3.5-turbo",
+                    temperature: 2,
+                },
+            });
+            const gptResponse = await chatAPI.sendMessage("Who are toy?");
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(gptResponse, null, 2));
+        }
+        catch (error) {
+            logError(`ChatGPT request failed: ${error.message}`);
+            res.writeHead(500, { "Content-Type": "text/plain" });
+            res.end("Internal Server Error");
+        }
+    }
     else if (req.url === "/log") {
         res.writeHead(200, { "Content-Type": "text/html" });
         const body = log
-            .map((entry) => `<p>${entry.timestamp.toISOString()} [${entry.type}] ${entry.message}</p>`)
+            .reverse()
+            .map((entry) => `<p><strong>${entry.timestamp.toISOString()} [${entry.type}]</strong> ${entry.message}</p>`)
             .join("");
-        res.end(`<html><body>${body}</body></html>`);
+        res.end(`<html><body><pre>${body}</pre></body></html>`);
     }
     else if (req.url === "/chatgpt" && req.method === "POST") {
         try {
@@ -63,28 +84,28 @@ export const server = http.createServer(async (req, res) => {
                 res.end("Bad Request");
                 return;
             }
-            const { prompt, role, model, schema, temperature, top_p, max_tokens, securityKey, } = data;
-            if (securityKey !== process.env.SECURITY_KEY) {
+            const { prompt, model, temperature, top_p, max_tokens, security_key } = data;
+            if (security_key !== process.env.SECURITY_KEY) {
                 res.writeHead(403, { "Content-Type": "text/plain" });
                 res.end("Forbidden");
                 return;
             }
+            const started = new Date().getTime();
+            logInfo(`ChatGPT request: ${prompt}`);
             const chatAPI = new ChatGPTAPI({
                 apiKey: process.env.OPENAI_API_KEY,
                 apiBaseUrl: "https://api.openai.com/v1",
                 completionParams: {
                     model: model ?? "gpt-3.5-turbo",
-                    temperature: temperature ?? 0.5,
-                    top_p: top_p ?? 0.5,
+                    temperature: temperature ?? 1,
+                    top_p: top_p ?? 1,
                     max_tokens,
                 },
             });
             const gptResponse = await chatAPI.sendMessage(prompt, {
-                systemMessage: schema
-                    ? `You are a machine that only returns and replies with valid, iterable RFC8259 compliant JSON in your responses according to the schema: ${schema}.`
-                    : role,
+                systemMessage: `You are an AI assistant.`,
             });
-            logInfo(`ChatGPT request: ${prompt}`);
+            logInfo(`ChatGPT request successful in ${((new Date().getTime() - started) / 1000).toFixed()}s...`);
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify(gptResponse, null, 2));
         }
