@@ -1,5 +1,6 @@
 import http from "http";
 import { config } from "dotenv";
+import OpenAI from 'openai';
 
 config({ path: [".env.local", ".env"] });
 
@@ -93,6 +94,33 @@ export const server = http.createServer(async (req, res) => {
       res.writeHead(500, { "Content-Type": "text/plain" });
       res.end("Internal Server Error");
     }
+  } else if (req.url === "/health2") {
+    try {
+      const openai = new OpenAI({
+        apiKey: process.env.OPENAI_API_KEY as string,
+      });
+
+      const chatCompletion = await openai.chat.completions.create({
+        model: "gpt-3.5-turbo",
+        messages: [
+          {
+            role: "system",
+            content: "You are an AI assistant.",
+          },
+          {
+            role: "user",
+            content: "What is the meaning of life?",
+          },
+        ],
+      });
+
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(chatCompletion, null, 2));
+    } catch (error: any) {
+      logError(`ChatGPT request failed: ${error.message}`);
+      res.writeHead(500, { "Content-Type": "text/plain" });
+      res.end("Internal Server Error");
+    }
   } else if (req.url === "/log") {
     res.writeHead(200, { "Content-Type": "text/html" });
     const body = log
@@ -103,6 +131,41 @@ export const server = http.createServer(async (req, res) => {
       )
       .join("");
     res.end(`<html><body><pre>${body}</pre></body></html>`);
+  } else if (req.url === "/openai" && req.method === "POST") {
+    // This is a ChatGPT v1 API request
+    // https://platform.openai.com/docs/api-reference/chat/create
+    try {
+      const body = await getBody(req);
+      const data = JSON.parse(body);
+
+      const { security_key, ...create_chat_completion } = data;
+
+      if (security_key !== process.env.SECURITY_KEY) {
+        res.writeHead(403, { "Content-Type": "text/plain" });
+        res.end("Forbidden");
+        return;
+      }
+
+      const started = new Date().getTime();
+      logInfo(`ChatGPT request: ${prompt}`);
+
+      const openai = new OpenAI({
+        apiKey: process.env.OPENAI_API_KEY as string,
+      });
+
+      const chatCompletion = await openai.chat.completions.create(create_chat_completion);
+
+      logInfo(
+        `ChatGPT request successful in ${((new Date().getTime() - started) / 1000).toFixed()}s...`,
+      );
+
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(chatCompletion, null, 2));
+    } catch (error: any) {
+      logError(`ChatGPT request failed: ${error.message}`);
+      res.writeHead(500, { "Content-Type": "text/plain" });
+      res.end("Internal Server Error");
+    }
   } else if (req.url === "/chatgpt" && req.method === "POST") {
     try {
       const body = await getBody(req);
