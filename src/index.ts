@@ -1,6 +1,6 @@
 import http from "http";
 import { config } from "dotenv";
-import OpenAI from 'openai';
+import OpenAI from "openai";
 
 config({ path: [".env.local", ".env"] });
 
@@ -14,12 +14,12 @@ const log: LogEntry[] = [];
 
 function logError(message: string) {
   log.push({ type: "ERROR", message, timestamp: new Date() });
-  log.splice(0, log.length - 10);
+  log.splice(0, log.length - 100);
 }
 
 function logInfo(message: string) {
   log.push({ type: "INFO", message, timestamp: new Date() });
-  log.splice(0, log.length - 10);
+  log.splice(0, log.length - 100);
 }
 
 const { ChatGPTAPI } = await import("chatgpt");
@@ -69,6 +69,20 @@ function isChatGPTRequest(object: any): object is ChatGPTRequest {
 }
 
 export const server = http.createServer(async (req, res) => {
+  // Set CORS headers
+  res.setHeader("Access-Control-Allow-Origin", "*"); // Allow all origins
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS"); // Allow specific methods
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Origin, X-Requested-With, Content-Type, Accept",
+  ); // Allow specific headers
+
+  if (req.method === "OPTIONS") {
+    res.writeHead(200);
+    res.end();
+    return;
+  }
+
   if (req.url === "/") {
     res.writeHead(200, { "Content-Type": "text/html" });
     res.end("<h1>Hello, World!</h1>");
@@ -123,19 +137,24 @@ export const server = http.createServer(async (req, res) => {
     }
   } else if (req.url === "/log") {
     res.writeHead(200, { "Content-Type": "text/html" });
-    const body = log
+    const body = [...log]
       .reverse()
       .map(
         (entry) =>
           `<p><strong>${entry.timestamp.toISOString()} [${entry.type}]</strong> ${entry.message}</p>`,
       )
       .join("");
-    res.end(`<html><body><pre>${body}</pre></body></html>`);
+    res.end(
+      `<html><meta charset="UTF-8"><body><pre>${body}</pre></body></html>`,
+    );
   } else if (req.url === "/openai" && req.method === "POST") {
     // This is a ChatGPT v1 API request
     // https://platform.openai.com/docs/api-reference/chat/create
     try {
       const body = await getBody(req);
+
+      logInfo(`ChatGPT request text: ${body}`);
+
       const data = JSON.parse(body);
 
       const { security_key, ...create_chat_completion } = data;
@@ -147,20 +166,26 @@ export const server = http.createServer(async (req, res) => {
       }
 
       const started = new Date().getTime();
-      logInfo(`ChatGPT request: ${prompt}`);
+      logInfo(
+        `ChatGPT request: ${JSON.stringify(create_chat_completion, null, 2)}`,
+      );
 
       const openai = new OpenAI({
         apiKey: process.env.OPENAI_API_KEY as string,
       });
 
-      const chatCompletion = await openai.chat.completions.create(create_chat_completion);
+      const chatCompletion = await openai.chat.completions.create(
+        create_chat_completion,
+      );
+      const chatCompletionText = JSON.stringify(chatCompletion, null, 2);
 
+      logInfo(`ChatGPT response: ${chatCompletionText}`);
       logInfo(
         `ChatGPT request successful in ${((new Date().getTime() - started) / 1000).toFixed()}s...`,
       );
 
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(chatCompletion, null, 2));
+      res.end(chatCompletionText);
     } catch (error: any) {
       logError(`ChatGPT request failed: ${error.message}`);
       res.writeHead(500, { "Content-Type": "text/plain" });
