@@ -181,7 +181,10 @@ export const server = http.createServer(async (req, res) => {
 
       logInfo(`ChatGPT response: ${chatCompletionText}`);
       logInfo(
-        `ChatGPT request successful in ${((new Date().getTime() - started) / 1000).toFixed()}s...`,
+        `ChatGPT request successful in ${(
+          (new Date().getTime() - started) /
+          1000
+        ).toFixed()}s...`,
       );
 
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -218,7 +221,7 @@ export const server = http.createServer(async (req, res) => {
         apiKey: process.env.OPENAI_API_KEY as string,
         apiBaseUrl: "https://api.openai.com/v1",
         completionParams: {
-          model: model ?? "gpt-3.5-turbo",
+          model: model ?? "gpt-4o",
           temperature: temperature ?? 1,
           top_p: top_p ?? 1,
           max_tokens,
@@ -230,13 +233,60 @@ export const server = http.createServer(async (req, res) => {
       });
 
       logInfo(
-        `ChatGPT request successful in ${((new Date().getTime() - started) / 1000).toFixed()}s...`,
+        `ChatGPT request successful in ${(
+          (new Date().getTime() - started) /
+          1000
+        ).toFixed()}s...`,
       );
 
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(gptResponse, null, 2));
     } catch (error: any) {
       logError(`ChatGPT request failed: ${error.message}`);
+      res.writeHead(500, { "Content-Type": "text/plain" });
+      res.end("Internal Server Error");
+    }
+
+    // New Embeddings Endpoint
+  } else if (req.url === "/embeddings" && req.method === "POST") {
+    try {
+      const body = await getBody(req);
+      const data = JSON.parse(body);
+
+      const { input, model, security_key } = data;
+
+      if (security_key !== process.env.SECURITY_KEY) {
+        res.writeHead(403, { "Content-Type": "text/plain" });
+        res.end("Forbidden");
+        return;
+      }
+
+      const started = new Date().getTime();
+      logInfo(`Embeddings request: ${JSON.stringify({ input, model }, null, 2)}`);
+
+      const openai = new OpenAI({
+        apiKey: process.env.OPENAI_API_KEY as string,
+      });
+
+      const embeddingsResponse = await openai.embeddings.create({
+        model: model ?? "text-embedding-3-large",
+        input,
+      });
+
+      const embeddingsResponseText = JSON.stringify(embeddingsResponse, null, 2);
+
+      logInfo(`Embeddings response: ${embeddingsResponseText}`);
+      logInfo(
+        `Embeddings request successful in ${(
+          (new Date().getTime() - started) /
+          1000
+        ).toFixed()}s...`,
+      );
+
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(embeddingsResponseText);
+    } catch (error: any) {
+      logError(`Embeddings request failed: ${error.message}`);
       res.writeHead(500, { "Content-Type": "text/plain" });
       res.end("Internal Server Error");
     }
