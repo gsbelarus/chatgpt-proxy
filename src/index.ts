@@ -253,7 +253,7 @@ export const server = http.createServer(async (req, res) => {
       const body = await getBody(req);
       const data = JSON.parse(body);
 
-      const { input, model, security_key } = data;
+      const { input, model, security_key, dimensions, encoding_format } = data;
 
       if (security_key !== process.env.SECURITY_KEY) {
         res.writeHead(403, { "Content-Type": "text/plain" });
@@ -271,11 +271,13 @@ export const server = http.createServer(async (req, res) => {
       const embeddingsResponse = await openai.embeddings.create({
         model: model ?? "text-embedding-3-large",
         input,
+        dimensions,
+        encoding_format,
       });
 
       const embeddingsResponseText = JSON.stringify(embeddingsResponse, null, 2);
 
-      logInfo(`Embeddings response: ${embeddingsResponseText}`);
+      //logInfo(`Embeddings response: ${embeddingsResponseText}`);
       logInfo(
         `Embeddings request successful in ${(
           (new Date().getTime() - started) /
