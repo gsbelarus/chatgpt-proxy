@@ -11,15 +11,17 @@ type LogEntry = {
 };
 
 const log: LogEntry[] = [];
+const maxLogLength = 1000;
 
 function logError(message: string) {
+  console.error(message);
   log.push({ type: "ERROR", message, timestamp: new Date() });
-  log.splice(0, log.length - 100);
+  log.splice(0, log.length - maxLogLength);
 }
 
 function logInfo(message: string) {
   log.push({ type: "INFO", message, timestamp: new Date() });
-  log.splice(0, log.length - 100);
+  log.splice(0, log.length - maxLogLength);
 }
 
 const { ChatGPTAPI } = await import("chatgpt");
@@ -85,14 +87,14 @@ export const server = http.createServer(async (req, res) => {
 
   if (req.url === "/") {
     res.writeHead(200, { "Content-Type": "text/html" });
-    res.end("<h1>Hello, World!</h1>");
+    res.end("<h1>Hello, World!</h1><div>31.01.2025</div>");
   } else if (req.url === "/health") {
     try {
       const chatAPI = new ChatGPTAPI({
         apiKey: process.env.OPENAI_API_KEY as string,
         apiBaseUrl: "https://api.openai.com/v1",
         completionParams: {
-          model: "gpt-3.5-turbo",
+          model: "gpt-4o-mini",
           temperature: 1,
         },
       });
@@ -115,7 +117,7 @@ export const server = http.createServer(async (req, res) => {
       });
 
       const chatCompletion = await openai.chat.completions.create({
-        model: "gpt-3.5-turbo",
+        model: "gpt-4o-mini",
         messages: [
           {
             role: "system",
@@ -157,7 +159,7 @@ export const server = http.createServer(async (req, res) => {
 
       const data = JSON.parse(body);
 
-      const { security_key, ...create_chat_completion } = data;
+      const { security_key, openai_api_key, project, organization, timeout, ...create_chat_completion } = data;
 
       if (security_key !== process.env.SECURITY_KEY) {
         res.writeHead(403, { "Content-Type": "text/plain" });
@@ -171,12 +173,15 @@ export const server = http.createServer(async (req, res) => {
       );
 
       const openai = new OpenAI({
-        apiKey: process.env.OPENAI_API_KEY as string,
+        apiKey: openai_api_key || (process.env.OPENAI_API_KEY as string),
+        project: project ?? null,
+        organization: organization ?? null,
       });
 
-      const chatCompletion = await openai.chat.completions.create(
-        create_chat_completion,
-      );
+      const chatCompletion = await openai.chat.completions.create({
+        ...create_chat_completion,
+        //timeout: 180_000,
+      });
       const chatCompletionText = JSON.stringify(chatCompletion, null, 2);
 
       logInfo(`ChatGPT response: ${chatCompletionText}`);
@@ -221,7 +226,7 @@ export const server = http.createServer(async (req, res) => {
         apiKey: process.env.OPENAI_API_KEY as string,
         apiBaseUrl: "https://api.openai.com/v1",
         completionParams: {
-          model: model ?? "gpt-4o",
+          model: model ?? "gpt-4o-mini",
           temperature: temperature ?? 1,
           top_p: top_p ?? 1,
           max_tokens,
