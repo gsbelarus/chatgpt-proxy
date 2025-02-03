@@ -159,7 +159,14 @@ export const server = http.createServer(async (req, res) => {
 
       const data = JSON.parse(body);
 
-      const { security_key, openai_api_key, project, organization, timeout, ...create_chat_completion } = data;
+      const {
+        security_key,
+        openai_api_key,
+        project,
+        organization,
+        timeout,
+        ...create_chat_completion
+      } = data;
 
       if (security_key !== process.env.SECURITY_KEY) {
         res.writeHead(403, { "Content-Type": "text/plain" });
@@ -219,14 +226,18 @@ export const server = http.createServer(async (req, res) => {
         return;
       }
 
+      const useModel = model ?? "gpt-4o-mini";
+
       const started = new Date().getTime();
-      logInfo(`ChatGPT request: ${prompt}`);
+      logInfo(
+        `model: ${useModel}, temperature: ${temperature}, prompt: ${prompt}`,
+      );
 
       const chatAPI = new ChatGPTAPI({
         apiKey: process.env.OPENAI_API_KEY as string,
         apiBaseUrl: "https://api.openai.com/v1",
         completionParams: {
-          model: model ?? "gpt-4o-mini",
+          model: useModel,
           temperature: temperature ?? 1,
           top_p: top_p ?? 1,
           max_tokens,
@@ -267,7 +278,9 @@ export const server = http.createServer(async (req, res) => {
       }
 
       const started = new Date().getTime();
-      logInfo(`Embeddings request: ${JSON.stringify({ input, model }, null, 2)}`);
+      logInfo(
+        `Embeddings request: ${JSON.stringify({ input, model }, null, 2)}`,
+      );
 
       const openai = new OpenAI({
         apiKey: process.env.OPENAI_API_KEY as string,
@@ -280,7 +293,11 @@ export const server = http.createServer(async (req, res) => {
         encoding_format,
       });
 
-      const embeddingsResponseText = JSON.stringify(embeddingsResponse, null, 2);
+      const embeddingsResponseText = JSON.stringify(
+        embeddingsResponse,
+        null,
+        2,
+      );
 
       //logInfo(`Embeddings response: ${embeddingsResponseText}`);
       logInfo(
