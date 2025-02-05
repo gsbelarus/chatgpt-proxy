@@ -12,6 +12,7 @@ type LogEntry = {
 
 const log: LogEntry[] = [];
 const maxLogLength = 1000;
+let requestCount = 0;
 
 function logError(message: string) {
   console.error(message);
@@ -143,7 +144,7 @@ export const server = http.createServer(async (req, res) => {
       .reverse()
       .map(
         (entry) =>
-          `<p><strong>${entry.timestamp.toISOString()} [${entry.type}]</strong> ${entry.message}</p>`,
+          `<p><strong># ${++requestCount}, ${entry.timestamp.toISOString()} [${entry.type}]</strong> ${entry.message}</p>`,
       )
       .join("");
     res.end(
@@ -189,13 +190,15 @@ export const server = http.createServer(async (req, res) => {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(chatCompletionText);
 
-      logInfo(
-        `ChatGPT request: ${JSON.stringify(create_chat_completion, null, 2)}
+      const createChatCompletionText = JSON.stringify(create_chat_completion, null, 2);
 
-         ChatGPT response: ${chatCompletionText}
+      logInfo(`
+<strong>Request:</strong> ${createChatCompletionText}
 
-         ChatGPT request successful in ${((new Date().getTime() - started) / 1000).toFixed()}s...
-        `,
+<strong>Response:</strong> ${chatCompletionText}
+
+<strong>Request successful in ${((new Date().getTime() - started) / 1000).toFixed(1)}s...</strong>
+`,
       );
     } catch (error: any) {
       logError(`ChatGPT request failed: ${error.message}`);
