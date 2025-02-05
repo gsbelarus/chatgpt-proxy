@@ -120,8 +120,9 @@ export const server = http.createServer(async (req, res) => {
         // This is a ChatGPT v1 API request
         // https://platform.openai.com/docs/api-reference/chat/create
         try {
+            const started = new Date().getTime();
             const body = await getBody(req);
-            logInfo(`ChatGPT request text: ${body}`);
+            //logInfo(`ChatGPT request text: ${body}`);
             const data = JSON.parse(body);
             const { security_key, openai_api_key, project, organization, timeout, ...create_chat_completion } = data;
             if (security_key !== process.env.SECURITY_KEY) {
@@ -129,23 +130,21 @@ export const server = http.createServer(async (req, res) => {
                 res.end("Forbidden");
                 return;
             }
-            const started = new Date().getTime();
-            logInfo(`ChatGPT request: ${JSON.stringify(create_chat_completion, null, 2)}`);
             const openai = new OpenAI({
                 apiKey: openai_api_key || process.env.OPENAI_API_KEY,
                 project: project ?? null,
                 organization: organization ?? null,
             });
-            const chatCompletion = await openai.chat.completions.create({
-                ...create_chat_completion,
-                //timeout: 180_000,
-            });
+            const chatCompletion = await openai.chat.completions.create(create_chat_completion);
             const chatCompletionText = JSON.stringify(chatCompletion, null, 2);
-            logInfo(`ChatGPT response: ${chatCompletionText}`);
-            logInfo(`ChatGPT request successful in ${((new Date().getTime() - started) /
-                1000).toFixed()}s...`);
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(chatCompletionText);
+            logInfo(`ChatGPT request: ${JSON.stringify(create_chat_completion, null, 2)}
+
+         ChatGPT response: ${chatCompletionText}
+
+         ChatGPT request successful in ${((new Date().getTime() - started) / 1000).toFixed()}s...
+        `);
         }
         catch (error) {
             logError(`ChatGPT request failed: ${error.message}`);
