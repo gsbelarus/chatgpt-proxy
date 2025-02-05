@@ -4,6 +4,14 @@ import OpenAI from "openai";
 config({ path: [".env.local", ".env"] });
 const log = [];
 const maxLogLength = 1000;
+let requestCount = 0;
+let totalRequestTime = 0;
+let maxRequestTime = 0;
+let maxParallelRequests = 0;
+let currentParallelRequests = 0;
+let maxPromptTokens = 0;
+let maxCachedTokens = 0;
+let maxCompletionTokens = 0;
 function logError(message) {
     console.error(message);
     log.push({ type: "ERROR", message, timestamp: new Date() });
@@ -55,6 +63,7 @@ export const server = http.createServer(async (req, res) => {
         res.end();
         return;
     }
+    req.setTimeout(900_000); // 15 minutes
     if (req.url === "/") {
         res.writeHead(200, { "Content-Type": "text/html" });
         res.end("<h1>Hello, World!</h1><div>31.01.2025</div>");
@@ -114,7 +123,20 @@ export const server = http.createServer(async (req, res) => {
             .reverse()
             .map((entry) => `<p><strong>${entry.timestamp.toISOString()} [${entry.type}]</strong> ${entry.message}</p>`)
             .join("");
-        res.end(`<html><meta charset="UTF-8"><body><pre>${body}</pre></body></html>`);
+        res.end(`<html>
+           <meta charset="UTF-8">
+           <body>
+             <div>Request count: ${requestCount}</div>
+             <div>Total request time: ${totalRequestTime.toFixed()}s</div>
+             <div>Average request time: ${(totalRequestTime / requestCount).toFixed(1)}s</div>
+             <div>Max request time: ${maxRequestTime.toFixed(1)}s</div>
+             <div>Max parallel requests: ${maxParallelRequests}</div>
+             <div>Max prompt tokens: ${maxPromptTokens}</div>
+             <div>Max cached tokens: ${maxCachedTokens}</div>
+             <div>Max completion tokens: ${maxCompletionTokens}</div>
+             <pre>${body}</pre>
+           </body>
+         </html>`);
     }
     else if (req.url === "/openai" && req.method === "POST") {
         // This is a ChatGPT v1 API request
@@ -135,16 +157,46 @@ export const server = http.createServer(async (req, res) => {
                 project: project ?? null,
                 organization: organization ?? null,
             });
-            const chatCompletion = await openai.chat.completions.create(create_chat_completion);
+            let chatCompletion;
+            try {
+                currentParallelRequests++;
+                if (currentParallelRequests > maxParallelRequests) {
+                    maxParallelRequests = currentParallelRequests;
+                }
+                chatCompletion = await openai.chat.completions.create(create_chat_completion);
+            }
+            finally {
+                currentParallelRequests--;
+            }
             const chatCompletionText = JSON.stringify(chatCompletion, null, 2);
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(chatCompletionText);
-            logInfo(`ChatGPT request: ${JSON.stringify(create_chat_completion, null, 2)}
+            const createChatCompletionText = JSON.stringify(create_chat_completion, null, 2);
+            requestCount++;
+            const requestTime = (new Date().getTime() - started) / 1000;
+            totalRequestTime += requestTime;
+            if (requestTime > maxRequestTime) {
+                maxRequestTime = requestTime;
+            }
+            const promptTokenCount = chatCompletion.usage?.prompt_tokens ?? 0;
+            const cachedTokenCount = chatCompletion.usage?.prompt_tokens_details?.cached_tokens ?? 0;
+            const completionTokenCount = chatCompletion.usage?.completion_tokens ?? 0;
+            if (promptTokenCount > maxPromptTokens) {
+                maxPromptTokens = promptTokenCount;
+            }
+            if (cachedTokenCount > maxCachedTokens) {
+                maxCachedTokens = cachedTokenCount;
+            }
+            if (completionTokenCount > maxCompletionTokens) {
+                maxCompletionTokens = completionTokenCount;
+            }
+            logInfo(`
+<strong>Request #${requestCount}:</strong> ${createChatCompletionText}
 
-         ChatGPT response: ${chatCompletionText}
+<strong>Response:</strong> ${chatCompletionText}
 
-         ChatGPT request successful in ${((new Date().getTime() - started) / 1000).toFixed()}s...
-        `);
+<strong>Request successful in ${requestTime.toFixed(1)}s...</strong> Prompt tokens: ${promptTokenCount}, Cached tokens: ${cachedTokenCount}, Completion tokens: ${completionTokenCount}
+`);
         }
         catch (error) {
             logError(`ChatGPT request failed: ${error.message}`);
@@ -234,8 +286,15 @@ export const server = http.createServer(async (req, res) => {
         res.end("Not Found");
     }
 });
+server.requestTimeout = 900_000;
+server.timeout = 900_000;
+server.keepAliveTimeout = 900_000;
+server.headersTimeout = 950_000; // Slightly longer than request timeout
 const port = 3002;
 server.listen(port, () => {
-    console.log(`Server running on http://localhost:${port}/`);
+    console.log(`Server running on http://localhost:${port}/
+     Timeout: ${server.timeout}ms
+     Keep Alive Timeout: ${server.keepAliveTimeout}ms
+     Headers Timeout: ${server.headersTimeout}ms`);
 });
 //# sourceMappingURL=index.js.map
