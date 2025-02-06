@@ -12,6 +12,7 @@ let currentParallelRequests = 0;
 let maxPromptTokens = 0;
 let maxCachedTokens = 0;
 let maxCompletionTokens = 0;
+let errorCount = 0;
 function logError(message) {
     console.error(message);
     log.push({ type: "ERROR", message, timestamp: new Date() });
@@ -134,6 +135,7 @@ export const server = http.createServer(async (req, res) => {
              <div>Max prompt tokens: ${maxPromptTokens}</div>
              <div>Max cached tokens: ${maxCachedTokens}</div>
              <div>Max completion tokens: ${maxCompletionTokens}</div>
+             <div>Error count: ${errorCount}</div>
              <pre>${body}</pre>
            </body>
          </html>`);
@@ -199,6 +201,7 @@ export const server = http.createServer(async (req, res) => {
 `);
         }
         catch (error) {
+            errorCount++;
             logError(`ChatGPT request failed: ${error.message}`);
             res.writeHead(500, { "Content-Type": "text/plain" });
             res.end("Internal Server Error");
