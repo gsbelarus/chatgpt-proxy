@@ -11,7 +11,7 @@ type LogEntry = {
 };
 
 const log: LogEntry[] = [];
-const maxLogLength = 1000;
+const maxLogLength = 100;
 let requestCount = 0;
 let totalRequestTime = 0;
 let maxRequestTime = 0;
@@ -21,6 +21,7 @@ let maxPromptTokens = 0;
 let maxCachedTokens = 0;
 let maxCompletionTokens = 0;
 let errorCount = 0;
+let lastLogTime = 0;
 
 function logError(message: string) {
   console.error(message);
@@ -77,6 +78,13 @@ function isChatGPTRequest(object: any): object is ChatGPTRequest {
         object.top_p >= 0 &&
         object.top_p <= 1))
   );
+}
+
+function checkAccess(req: http.IncomingMessage): boolean {
+  const urlObj = new URL(req.url!, `http://${req.headers.host}`);
+  const searchParams = urlObj.searchParams;
+
+  return searchParams.get("access_token") === '123';
 }
 
 export const server = http.createServer(async (req, res) => {
@@ -149,6 +157,20 @@ export const server = http.createServer(async (req, res) => {
       res.end("Internal Server Error");
     }
   } else if (req.url === "/log") {
+    if (!checkAccess(req)) {
+      res.writeHead(403, { "Content-Type": "text/plain" });
+      res.end("Forbidden");
+      return;
+    }
+
+    if (new Date().getTime() - lastLogTime < 10_000) {
+      res.writeHead(429, { "Content-Type": "text/plain" });
+      res.end("Too Many Requests");
+      return;
+    }
+
+    lastLogTime = new Date().getTime();
+
     res.writeHead(200, { "Content-Type": "text/html" });
     const body = [...log]
       .reverse()
