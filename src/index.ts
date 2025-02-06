@@ -26,27 +26,33 @@ let lastLogTime = 0;
 function logError(message: string) {
   console.error(message);
   log.push({ type: "ERROR", message, timestamp: new Date() });
-  log.splice(0, log.length - maxLogLength);
+  if (log.length > maxLogLength) {
+    log.splice(0, log.length - maxLogLength);
+  }
 }
 
 function logInfo(message: string) {
   log.push({ type: "INFO", message, timestamp: new Date() });
-  log.splice(0, log.length - maxLogLength);
+  if (log.length > maxLogLength) {
+    log.splice(0, log.length - maxLogLength);
+  }
 }
 
 const { ChatGPTAPI } = await import("chatgpt");
 
 function getBody(request: http.IncomingMessage): Promise<string> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const bodyParts: any[] = [];
-    let body;
     request
       .on("data", (chunk) => {
         bodyParts.push(chunk);
       })
       .on("end", () => {
-        body = Buffer.concat(bodyParts).toString();
+        const body = Buffer.concat(bodyParts).toString();
         resolve(body);
+      })
+      .on("error", (err) => {
+        reject(err);
       });
   });
 }
@@ -124,8 +130,9 @@ export const server = http.createServer(async (req, res) => {
 
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(gptResponse, null, 2));
-    } catch (error: any) {
-      logError(`ChatGPT request failed: ${error.message}`);
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      logError(`ChatGPT request failed: ${errorMessage}`);
       res.writeHead(500, { "Content-Type": "text/plain" });
       res.end("Internal Server Error");
     }
@@ -151,8 +158,9 @@ export const server = http.createServer(async (req, res) => {
 
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(chatCompletion, null, 2));
-    } catch (error: any) {
-      logError(`ChatGPT request failed: ${error.message}`);
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      logError(`ChatGPT request failed: ${errorMessage}`);
       res.writeHead(500, { "Content-Type": "text/plain" });
       res.end("Internal Server Error");
     }
@@ -163,13 +171,13 @@ export const server = http.createServer(async (req, res) => {
       return;
     }
 
-    if (new Date().getTime() - lastLogTime < 10_000) {
+    if (Date.now() - lastLogTime < 10_000) {
       res.writeHead(429, { "Content-Type": "text/plain" });
       res.end("Too Many Requests");
       return;
     }
 
-    lastLogTime = new Date().getTime();
+    lastLogTime = Date.now();
 
     res.writeHead(200, { "Content-Type": "text/html" });
     const body = [...log]
@@ -200,7 +208,7 @@ export const server = http.createServer(async (req, res) => {
     // This is a ChatGPT v1 API request
     // https://platform.openai.com/docs/api-reference/chat/create
     try {
-      const started = new Date().getTime();
+      const started = Date.now();
       const body = await getBody(req);
 
       //logInfo(`ChatGPT request text: ${body}`);
@@ -256,7 +264,7 @@ export const server = http.createServer(async (req, res) => {
       );
 
       requestCount++;
-      const requestTime = (new Date().getTime() - started) / 1000;
+      const requestTime = (Date.now() - started) / 1000;
       totalRequestTime += requestTime;
 
       if (requestTime > maxRequestTime) {
@@ -287,9 +295,10 @@ export const server = http.createServer(async (req, res) => {
 
 <strong>Request successful in ${requestTime.toFixed(1)}s...</strong> Prompt tokens: ${promptTokenCount}, Cached tokens: ${cachedTokenCount}, Completion tokens: ${completionTokenCount}
 `);
-    } catch (error: any) {
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
       errorCount++;
-      logError(`ChatGPT request failed: ${error.message}`);
+      logError(`ChatGPT request failed: ${errorMessage}`);
       res.writeHead(500, { "Content-Type": "text/plain" });
       res.end("Internal Server Error");
     }
@@ -315,7 +324,7 @@ export const server = http.createServer(async (req, res) => {
 
       const useModel = model ?? "gpt-4o-mini";
 
-      const started = new Date().getTime();
+      const started = Date.now();
       logInfo(
         `model: ${useModel}, temperature: ${temperature}, prompt: ${prompt}`,
       );
@@ -337,15 +346,16 @@ export const server = http.createServer(async (req, res) => {
 
       logInfo(
         `ChatGPT request successful in ${(
-          (new Date().getTime() - started) /
+          (Date.now() - started) /
           1000
         ).toFixed()}s...`,
       );
 
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(gptResponse, null, 2));
-    } catch (error: any) {
-      logError(`ChatGPT request failed: ${error.message}`);
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      logError(`ChatGPT request failed: ${errorMessage}`);
       res.writeHead(500, { "Content-Type": "text/plain" });
       res.end("Internal Server Error");
     }
@@ -364,7 +374,7 @@ export const server = http.createServer(async (req, res) => {
         return;
       }
 
-      const started = new Date().getTime();
+      const started = Date.now();
       logInfo(
         `Embeddings request: ${JSON.stringify({ input, model }, null, 2)}`,
       );
@@ -389,15 +399,16 @@ export const server = http.createServer(async (req, res) => {
       //logInfo(`Embeddings response: ${embeddingsResponseText}`);
       logInfo(
         `Embeddings request successful in ${(
-          (new Date().getTime() - started) /
+          (Date.now() - started) /
           1000
         ).toFixed()}s...`,
       );
 
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(embeddingsResponseText);
-    } catch (error: any) {
-      logError(`Embeddings request failed: ${error.message}`);
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      logError(`Embeddings request failed: ${errorMessage}`);
       res.writeHead(500, { "Content-Type": "text/plain" });
       res.end("Internal Server Error");
     }
