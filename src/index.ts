@@ -179,6 +179,9 @@ export const server = http.createServer(async (req, res) => {
 
     lastLogTime = Date.now();
 
+    const avgRequestTime =
+      requestCount > 0 ? (totalRequestTime / requestCount).toFixed(1) : "0.0";
+
     res.writeHead(200, { "Content-Type": "text/html" });
     const body = [...log]
       .reverse()
@@ -193,7 +196,7 @@ export const server = http.createServer(async (req, res) => {
            <body>
              <div>Request count: ${requestCount}</div>
              <div>Total request time: ${totalRequestTime.toFixed()}s</div>
-             <div>Average request time: ${(totalRequestTime / requestCount).toFixed(1)}s</div>
+             <div>Average request time: ${avgRequestTime}s</div>
              <div>Max request time: ${maxRequestTime.toFixed(1)}s</div>
              <div>Max parallel requests: ${maxParallelRequests}</div>
              <div>Max prompt tokens: ${maxPromptTokens}</div>
