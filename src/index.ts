@@ -248,6 +248,7 @@ export const server = http.createServer(async (req, res) => {
         project,
         organization,
         timeout,
+        image,
         ...create_chat_completion
       } = data;
 
@@ -272,8 +273,25 @@ export const server = http.createServer(async (req, res) => {
           maxParallelRequests = currentParallelRequests;
         }
 
+        // If there is image, add it to messages
+        let completionPayload = { ...create_chat_completion };
+        if (image) {
+          if (!completionPayload.messages) completionPayload.messages = [];
+          completionPayload.messages.push({
+            role: "user",
+            content: [
+              { type: "text", text: create_chat_completion.messages?.[0]?.content || "" },
+              image.url
+                ? { type: "image_url", image_url: image.url }
+                : image.base64
+                ? { type: "image_url", image_url: `data:image/png;base64,${image.base64}` }
+                : undefined,
+            ].filter(Boolean),
+          });
+        }
+
         chatCompletion = await openai.chat.completions.create(
-          create_chat_completion,
+          completionPayload,
         );
       } finally {
         currentParallelRequests--;
