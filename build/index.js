@@ -2,8 +2,9 @@ import http from "http";
 import { config } from "dotenv";
 import OpenAI from "openai";
 config({ path: [".env.local", ".env"] });
-const log = [];
-const maxLogLength = 1000;
+const infos = [];
+const errors = [];
+const maxLogLength = 50;
 let requestCount = 0;
 let totalRequestTime = 0;
 let maxRequestTime = 0;
@@ -13,27 +14,33 @@ let maxPromptTokens = 0;
 let maxCachedTokens = 0;
 let maxCompletionTokens = 0;
 let errorCount = 0;
+let lastLogTime = 0;
 function logError(message) {
-    console.error(message);
-    log.push({ type: "ERROR", message, timestamp: new Date() });
-    log.splice(0, log.length - maxLogLength);
+    errors.push({ type: "ERROR", message, timestamp: new Date() });
+    if (errors.length > maxLogLength) {
+        errors.splice(0, errors.length - maxLogLength);
+    }
 }
 function logInfo(message) {
-    log.push({ type: "INFO", message, timestamp: new Date() });
-    log.splice(0, log.length - maxLogLength);
+    infos.push({ type: "INFO", message, timestamp: new Date() });
+    if (infos.length > maxLogLength) {
+        infos.splice(0, infos.length - maxLogLength);
+    }
 }
 const { ChatGPTAPI } = await import("chatgpt");
 function getBody(request) {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
         const bodyParts = [];
-        let body;
         request
             .on("data", (chunk) => {
             bodyParts.push(chunk);
         })
             .on("end", () => {
-            body = Buffer.concat(bodyParts).toString();
+            const body = Buffer.concat(bodyParts).toString();
             resolve(body);
+        })
+            .on("error", (err) => {
+            reject(err);
         });
     });
 }
@@ -54,6 +61,11 @@ function isChatGPTRequest(object) {
                 object.top_p >= 0 &&
                 object.top_p <= 1)));
 }
+function checkAccess(req) {
+    const urlObj = new URL(req.url, `http://${req.headers.host}`);
+    const searchParams = urlObj.searchParams;
+    return searchParams.get("access_token") === "123";
+}
 export const server = http.createServer(async (req, res) => {
     // Set CORS headers
     res.setHeader("Access-Control-Allow-Origin", "*"); // Allow all origins
@@ -70,6 +82,12 @@ export const server = http.createServer(async (req, res) => {
         res.end("<h1>Hello, World!</h1><div>31.01.2025</div>");
     }
     else if (req.url === "/health") {
+        if (Date.now() - lastLogTime < 10_000) {
+            res.writeHead(429, { "Content-Type": "text/plain" });
+            res.end("Too Many Requests");
+            return;
+        }
+        lastLogTime = Date.now();
         try {
             const chatAPI = new ChatGPTAPI({
                 apiKey: process.env.OPENAI_API_KEY,
@@ -85,13 +103,20 @@ export const server = http.createServer(async (req, res) => {
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify(gptResponse, null, 2));
         }
-        catch (error) {
-            logError(`ChatGPT request failed: ${error.message}`);
+        catch (err) {
+            const errorMessage = err instanceof Error ? err.message : String(err);
+            logError(`ChatGPT request failed: ${errorMessage}`);
             res.writeHead(500, { "Content-Type": "text/plain" });
             res.end("Internal Server Error");
         }
     }
     else if (req.url === "/health2") {
+        if (Date.now() - lastLogTime < 10_000) {
+            res.writeHead(429, { "Content-Type": "text/plain" });
+            res.end("Too Many Requests");
+            return;
+        }
+        lastLogTime = Date.now();
         try {
             const openai = new OpenAI({
                 apiKey: process.env.OPENAI_API_KEY,
@@ -112,15 +137,31 @@ export const server = http.createServer(async (req, res) => {
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify(chatCompletion, null, 2));
         }
-        catch (error) {
-            logError(`ChatGPT request failed: ${error.message}`);
+        catch (err) {
+            const errorMessage = err instanceof Error ? err.message : String(err);
+            logError(`ChatGPT request failed: ${errorMessage}`);
             res.writeHead(500, { "Content-Type": "text/plain" });
             res.end("Internal Server Error");
         }
     }
-    else if (req.url === "/log") {
+    else if (req.url?.startsWith("/log")) {
+        if (!checkAccess(req)) {
+            res.writeHead(403, { "Content-Type": "text/plain" });
+            res.end("Forbidden");
+            return;
+        }
+        if (Date.now() - lastLogTime < 10_000) {
+            res.writeHead(429, { "Content-Type": "text/plain" });
+            res.end("Too Many Requests");
+            return;
+        }
+        lastLogTime = Date.now();
+        const avgRequestTime = requestCount > 0 ? (totalRequestTime / requestCount).toFixed(1) : "0.0";
         res.writeHead(200, { "Content-Type": "text/html" });
-        const body = [...log]
+        const initData = req.url?.startsWith("/log_errors")
+            ? [...errors]
+            : [...infos];
+        const body = initData
             .reverse()
             .map((entry) => `<p><strong>${entry.timestamp.toISOString()} [${entry.type}]</strong> ${entry.message}</p>`)
             .join("");
@@ -129,7 +170,7 @@ export const server = http.createServer(async (req, res) => {
            <body>
              <div>Request count: ${requestCount}</div>
              <div>Total request time: ${totalRequestTime.toFixed()}s</div>
-             <div>Average request time: ${(totalRequestTime / requestCount).toFixed(1)}s</div>
+             <div>Average request time: ${avgRequestTime}s</div>
              <div>Max request time: ${maxRequestTime.toFixed(1)}s</div>
              <div>Max parallel requests: ${maxParallelRequests}</div>
              <div>Max prompt tokens: ${maxPromptTokens}</div>
@@ -141,10 +182,11 @@ export const server = http.createServer(async (req, res) => {
          </html>`);
     }
     else if (req.url === "/openai" && req.method === "POST") {
+        const started = Date.now();
+        let createChatCompletionText = "";
         // This is a ChatGPT v1 API request
         // https://platform.openai.com/docs/api-reference/chat/create
         try {
-            const started = new Date().getTime();
             const body = await getBody(req);
             //logInfo(`ChatGPT request text: ${body}`);
             const data = JSON.parse(body);
@@ -156,7 +198,7 @@ export const server = http.createServer(async (req, res) => {
             }
             const openai = new OpenAI({
                 apiKey: openai_api_key || process.env.OPENAI_API_KEY,
-                project: project ?? null,
+                project: project || (process.env.OPENAI_PROJECT_KEY ?? null),
                 organization: organization ?? null,
             });
             let chatCompletion;
@@ -173,9 +215,9 @@ export const server = http.createServer(async (req, res) => {
             const chatCompletionText = JSON.stringify(chatCompletion, null, 2);
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(chatCompletionText);
-            const createChatCompletionText = JSON.stringify(create_chat_completion, null, 2);
+            createChatCompletionText = JSON.stringify(create_chat_completion, null, 2);
             requestCount++;
-            const requestTime = (new Date().getTime() - started) / 1000;
+            const requestTime = (Date.now() - started) / 1000;
             totalRequestTime += requestTime;
             if (requestTime > maxRequestTime) {
                 maxRequestTime = requestTime;
@@ -200,9 +242,17 @@ export const server = http.createServer(async (req, res) => {
 <strong>Request successful in ${requestTime.toFixed(1)}s...</strong> Prompt tokens: ${promptTokenCount}, Cached tokens: ${cachedTokenCount}, Completion tokens: ${completionTokenCount}
 `);
         }
-        catch (error) {
+        catch (err) {
+            const errorMessage = err instanceof Error ? err.message : String(err);
+            const requestTime = (Date.now() - started) / 1000;
+            logError(`
+ChatGPT request failed: ${errorMessage}
+
+<strong>Request #${requestCount}:</strong> ${createChatCompletionText}
+
+<strong>Request done in ${requestTime.toFixed(1)}s...</strong>
+`);
             errorCount++;
-            logError(`ChatGPT request failed: ${error.message}`);
             res.writeHead(500, { "Content-Type": "text/plain" });
             res.end("Internal Server Error");
         }
@@ -223,7 +273,7 @@ export const server = http.createServer(async (req, res) => {
                 return;
             }
             const useModel = model ?? "gpt-4o-mini";
-            const started = new Date().getTime();
+            const started = Date.now();
             logInfo(`model: ${useModel}, temperature: ${temperature}, prompt: ${prompt}`);
             const chatAPI = new ChatGPTAPI({
                 apiKey: process.env.OPENAI_API_KEY,
@@ -238,13 +288,14 @@ export const server = http.createServer(async (req, res) => {
             const gptResponse = await chatAPI.sendMessage(prompt, {
                 systemMessage: `You are an AI assistant.`,
             });
-            logInfo(`ChatGPT request successful in ${((new Date().getTime() - started) /
+            logInfo(`ChatGPT request successful in ${((Date.now() - started) /
                 1000).toFixed()}s...`);
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify(gptResponse, null, 2));
         }
-        catch (error) {
-            logError(`ChatGPT request failed: ${error.message}`);
+        catch (err) {
+            const errorMessage = err instanceof Error ? err.message : String(err);
+            logError(`ChatGPT request failed: ${errorMessage}`);
             res.writeHead(500, { "Content-Type": "text/plain" });
             res.end("Internal Server Error");
         }
@@ -260,7 +311,7 @@ export const server = http.createServer(async (req, res) => {
                 res.end("Forbidden");
                 return;
             }
-            const started = new Date().getTime();
+            const started = Date.now();
             logInfo(`Embeddings request: ${JSON.stringify({ input, model }, null, 2)}`);
             const openai = new OpenAI({
                 apiKey: process.env.OPENAI_API_KEY,
@@ -273,13 +324,14 @@ export const server = http.createServer(async (req, res) => {
             });
             const embeddingsResponseText = JSON.stringify(embeddingsResponse, null, 2);
             //logInfo(`Embeddings response: ${embeddingsResponseText}`);
-            logInfo(`Embeddings request successful in ${((new Date().getTime() - started) /
+            logInfo(`Embeddings request successful in ${((Date.now() - started) /
                 1000).toFixed()}s...`);
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(embeddingsResponseText);
         }
-        catch (error) {
-            logError(`Embeddings request failed: ${error.message}`);
+        catch (err) {
+            const errorMessage = err instanceof Error ? err.message : String(err);
+            logError(`Embeddings request failed: ${errorMessage}`);
             res.writeHead(500, { "Content-Type": "text/plain" });
             res.end("Internal Server Error");
         }

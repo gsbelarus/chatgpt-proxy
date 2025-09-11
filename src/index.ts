@@ -12,7 +12,7 @@ type LogEntry = {
 
 const infos: LogEntry[] = [];
 const errors: LogEntry[] = [];
-const maxLogLength = 100;
+const maxLogLength = 50;
 
 let requestCount = 0;
 let totalRequestTime = 0;
@@ -91,7 +91,7 @@ function checkAccess(req: http.IncomingMessage): boolean {
   const urlObj = new URL(req.url!, `http://${req.headers.host}`);
   const searchParams = urlObj.searchParams;
 
-  return searchParams.get("access_token") === '123';
+  return searchParams.get("access_token") === "123";
 }
 
 export const server = http.createServer(async (req, res) => {
@@ -115,6 +115,14 @@ export const server = http.createServer(async (req, res) => {
     res.writeHead(200, { "Content-Type": "text/html" });
     res.end("<h1>Hello, World!</h1><div>31.01.2025</div>");
   } else if (req.url === "/health") {
+    if (Date.now() - lastLogTime < 10_000) {
+      res.writeHead(429, { "Content-Type": "text/plain" });
+      res.end("Too Many Requests");
+      return;
+    }
+
+    lastLogTime = Date.now();
+
     try {
       const chatAPI = new ChatGPTAPI({
         apiKey: process.env.OPENAI_API_KEY as string,
@@ -138,6 +146,14 @@ export const server = http.createServer(async (req, res) => {
       res.end("Internal Server Error");
     }
   } else if (req.url === "/health2") {
+    if (Date.now() - lastLogTime < 10_000) {
+      res.writeHead(429, { "Content-Type": "text/plain" });
+      res.end("Too Many Requests");
+      return;
+    }
+
+    lastLogTime = Date.now();
+
     try {
       const openai = new OpenAI({
         apiKey: process.env.OPENAI_API_KEY as string,
@@ -185,7 +201,9 @@ export const server = http.createServer(async (req, res) => {
 
     res.writeHead(200, { "Content-Type": "text/html" });
 
-    const initData = req.url?.startsWith("/log_errors") ? [...errors] : [...infos];
+    const initData = req.url?.startsWith("/log_errors")
+      ? [...errors]
+      : [...infos];
 
     const body = initData
       .reverse()
@@ -241,7 +259,7 @@ export const server = http.createServer(async (req, res) => {
 
       const openai = new OpenAI({
         apiKey: openai_api_key || (process.env.OPENAI_API_KEY as string),
-        project: project ?? null,
+        project: project || (process.env.OPENAI_PROJECT_KEY ?? null),
         organization: organization ?? null,
       });
 
