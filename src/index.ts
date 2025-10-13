@@ -1,6 +1,14 @@
 import http from "http";
 import { config } from "dotenv";
 import OpenAI from "openai";
+import Busboy from "busboy";
+import path from "path";
+import { createReadStream } from "fs";
+import fs from 'fs/promises';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 config({ path: [".env.local", ".env"] });
 
@@ -280,19 +288,23 @@ export const server = http.createServer(async (req, res) => {
           completionPayload.messages.push({
             role: "user",
             content: [
-              { type: "text", text: create_chat_completion.messages?.[0]?.content || "" },
+              {
+                type: "text",
+                text: create_chat_completion.messages?.[0]?.content || "",
+              },
               image.url
                 ? { type: "image_url", image_url: image.url }
                 : image.base64
-                ? { type: "image_url", image_url: `data:image/png;base64,${image.base64}` }
-                : undefined,
+                  ? {
+                      type: "image_url",
+                      image_url: `data:image/png;base64,${image.base64}`,
+                    }
+                  : undefined,
             ].filter(Boolean),
           });
         }
 
-        chatCompletion = await openai.chat.completions.create(
-          completionPayload,
-        );
+        chatCompletion = await openai.chat.completions.create(completionPayload);
       } finally {
         currentParallelRequests--;
       }
@@ -413,8 +425,103 @@ ChatGPT request failed: ${errorMessage}
       res.writeHead(500, { "Content-Type": "text/plain" });
       res.end("Internal Server Error");
     }
+  } else if (req.url === "/audio/transcriptions" && req.method === "POST") {
+    let tempDir;
+    let tempPath;
+    try {
+      // Get the audio file from the request body (expects multipart/form-data)
+      const contentType = req.headers["content-type"] || "";
+      if (!contentType.startsWith("multipart/form-data")) {
+        res.writeHead(400, { "Content-Type": "text/plain" });
+        res.end("Content-Type must be multipart/form-data");
+        return;
+      }
 
-    // New Embeddings Endpoint
+      let audioBuffer: Buffer | null = null;
+      let audioFilename = "audio.wav";
+      let security_key = "";
+      let project = "";
+      let organization = "";
+      let openai_api_key = "";
+
+      await new Promise<void>((resolve, reject) => {
+        const busboy = Busboy({ headers: req.headers });
+        busboy.on(
+          "file",
+          (
+            fieldname: string,
+            file: NodeJS.ReadableStream,
+            info: Busboy.FileInfo,
+          ) => {
+            const { filename } = info;
+
+            const chunks: Buffer[] = [];
+            audioFilename = filename || "audio.wav";
+            file.on("data", (data: Buffer) => chunks.push(data));
+            file.on("end", () => {
+              audioBuffer = Buffer.concat(chunks);
+            });
+          },
+        );
+        busboy.on("field", (fieldname, val) => {
+          if (fieldname === "security_key") security_key = val;
+          if (fieldname === "project") project = val;
+          if (fieldname === "organization") organization = val;
+          if (fieldname === "openai_api_key") openai_api_key = val;
+        });
+        busboy.on("finish", () => resolve());
+        busboy.on("error", reject);
+        req.pipe(busboy);
+      });
+
+      if (security_key !== process.env.SECURITY_KEY) {
+        res.writeHead(403, { "Content-Type": "text/plain" });
+        res.end("Forbidden");
+        return;
+      }
+
+      if (!audioBuffer) {
+        res.writeHead(400, { "Content-Type": "text/plain" });
+        res.end("No audio file uploaded");
+        return;
+      }
+
+      const openai = new OpenAI({
+        apiKey: openai_api_key ?? process.env.OPENAI_API_KEY,
+        project: project ?? process.env.OPENAI_PROJECT_KEY ?? null,
+        organization: organization ?? null,
+      });
+
+      tempDir = path.join(__dirname, 'temp_audio');
+      tempPath = path.join(tempDir, audioFilename);      
+
+      await fs.mkdir(tempDir, { recursive: true });
+      await fs.writeFile(tempPath, audioBuffer);
+
+      const audioStream = createReadStream(tempPath);
+      const transcription = await openai.audio.transcriptions.create({
+        file: audioStream,
+        model: "whisper-1",
+        response_format: "json",
+      });
+
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(transcription, null, 2));
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      logError(`Audio transcription failed: ${errorMessage}`);
+      res.writeHead(500, { "Content-Type": "text/plain" });
+      res.end("Internal Server Error");
+    } finally {
+      if (tempPath) {
+        try {
+          await fs.unlink(tempPath);
+        } catch (err) {
+          const errorMessage = err instanceof Error ? err.message : String(err);
+          logError(`Failed to delete temp file ${tempPath}: ${errorMessage}`);
+        }
+      }      
+    }
   } else if (req.url === "/embeddings" && req.method === "POST") {
     try {
       const body = await getBody(req);
