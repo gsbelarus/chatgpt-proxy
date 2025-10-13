@@ -6,6 +6,7 @@ import path from "path";
 import { createReadStream } from "fs";
 import fs from 'fs/promises';
 import { fileURLToPath } from 'url';
+import { AudioResponseFormat } from "openai/resources";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -425,7 +426,7 @@ ChatGPT request failed: ${errorMessage}
       res.writeHead(500, { "Content-Type": "text/plain" });
       res.end("Internal Server Error");
     }
-  } else if (req.url === "/audio/transcriptions" && req.method === "POST") {
+  } else if (req.url === "/openai/audio/transcriptions" && req.method === "POST") {
     let tempDir;
     let tempPath;
     try {
@@ -443,6 +444,12 @@ ChatGPT request failed: ${errorMessage}
       let project = "";
       let organization = "";
       let openai_api_key = "";
+      let language = "";
+      let model = "whisper-1";
+      let prompt: string | undefined = undefined;
+      let temperature = 0;
+      let timestamp_granularities: Array<'word' | 'segment'> | undefined = undefined;
+      let response_format: AudioResponseFormat = "json";
 
       await new Promise<void>((resolve, reject) => {
         const busboy = Busboy({ headers: req.headers });
@@ -468,6 +475,15 @@ ChatGPT request failed: ${errorMessage}
           if (fieldname === "project") project = val;
           if (fieldname === "organization") organization = val;
           if (fieldname === "openai_api_key") openai_api_key = val;
+          if (fieldname === "language") language = val;
+          if (fieldname === "model") model = val;
+          if (fieldname === "prompt") prompt = val;
+          if (fieldname === "temperature") temperature = Number(val);
+          if (fieldname === "response_format") response_format = val as AudioResponseFormat;
+          if (fieldname === "timestamp_granularities[]") {
+            timestamp_granularities ??= [];
+            timestamp_granularities.push(val as ('word' | 'segment'));
+          }
         });
         busboy.on("finish", () => resolve());
         busboy.on("error", reject);
@@ -487,8 +503,8 @@ ChatGPT request failed: ${errorMessage}
       }
 
       const openai = new OpenAI({
-        apiKey: openai_api_key ?? process.env.OPENAI_API_KEY,
-        project: project ?? process.env.OPENAI_PROJECT_KEY ?? null,
+        apiKey: openai_api_key || process.env.OPENAI_API_KEY,
+        project: project || (process.env.OPENAI_PROJECT_KEY ?? null),
         organization: organization ?? null,
       });
 
@@ -501,8 +517,12 @@ ChatGPT request failed: ${errorMessage}
       const audioStream = createReadStream(tempPath);
       const transcription = await openai.audio.transcriptions.create({
         file: audioStream,
-        model: "whisper-1",
-        response_format: "json",
+        model,
+        response_format,
+        language,
+        prompt,
+        temperature,
+        timestamp_granularities
       });
 
       res.writeHead(200, { "Content-Type": "application/json" });
