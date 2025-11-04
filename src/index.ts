@@ -73,6 +73,7 @@ type ChatGPTRequest = {
   temperature?: number;
   top_p?: number;
   max_tokens?: number;
+  max_completion_tokens?: number;
   security_key: string;
 };
 
@@ -297,9 +298,9 @@ export const server = http.createServer(async (req, res) => {
                 ? { type: "image_url", image_url: image.url }
                 : image.base64
                   ? {
-                      type: "image_url",
-                      image_url: `data:image/png;base64,${image.base64}`,
-                    }
+                    type: "image_url",
+                    image_url: `data:image/png;base64,${image.base64}`,
+                  }
                   : undefined,
             ].filter(Boolean),
           });
@@ -380,7 +381,7 @@ ChatGPT request failed: ${errorMessage}
         return;
       }
 
-      const { prompt, model, temperature, top_p, max_tokens, security_key } =
+      const { prompt, model, temperature, top_p, max_tokens, max_completion_tokens, security_key } =
         data;
 
       if (security_key !== process.env.SECURITY_KEY) {
@@ -404,7 +405,8 @@ ChatGPT request failed: ${errorMessage}
           temperature: temperature ?? 1,
           top_p: top_p ?? 1,
           max_tokens,
-        },
+          max_completion_tokens,
+        } as any,
       });
 
       const gptResponse = await chatAPI.sendMessage(prompt, {
@@ -509,7 +511,7 @@ ChatGPT request failed: ${errorMessage}
       });
 
       tempDir = path.join(__dirname, 'temp_audio');
-      tempPath = path.join(tempDir, audioFilename);      
+      tempPath = path.join(tempDir, audioFilename);
 
       await fs.mkdir(tempDir, { recursive: true });
       await fs.writeFile(tempPath, audioBuffer);
@@ -540,7 +542,7 @@ ChatGPT request failed: ${errorMessage}
           const errorMessage = err instanceof Error ? err.message : String(err);
           logError(`Failed to delete temp file ${tempPath}: ${errorMessage}`);
         }
-      }      
+      }
     }
   } else if (req.url === "/embeddings" && req.method === "POST") {
     try {
