@@ -24,34 +24,6 @@
 
 ---
 
-### GET /health
-
-Проверка доступности OpenAI через библиотеку `chatgpt`.
-
-**Ответ**: JSON с ответом модели.
-
----
-
-### GET /health2
-
-Проверка доступности OpenAI через официальный SDK.
-
-**Ответ**: JSON с ответом модели.
-
----
-
-### GET /log и /log_errors
-
-Отдаёт логи (требует `access_token=123` в query).
-
-**Пример**:
-
-```
-GET /log?access_token=123
-```
-
----
-
 ### POST /openai
 
 Проксирует OpenAI Chat Completions API.
