@@ -11,6 +11,8 @@ import { AudioResponseFormat } from "openai/resources";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+const defaultModel = "gpt-4.1-mini";
+
 config({ path: [".env.local", ".env"] });
 
 type LogEntry = {
@@ -161,7 +163,7 @@ export const server = http.createServer(async (req, res) => {
         apiKey: process.env.OPENAI_API_KEY as string,
         apiBaseUrl: "https://api.openai.com/v1",
         completionParams: {
-          model: "gpt-4o-mini",
+          model: defaultModel,
           temperature: 1,
         },
       });
@@ -193,7 +195,7 @@ export const server = http.createServer(async (req, res) => {
       });
 
       const chatCompletion = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
+        model: defaultModel,
         messages: [
           {
             role: "system",
@@ -382,7 +384,7 @@ export const server = http.createServer(async (req, res) => {
             fields.input_text || fields.prompt || fields.message || undefined;
 
           if (!payload.model) {
-            payload.model = fields.model || "gpt-4o-mini";
+            payload.model = fields.model || defaultModel;
           }
 
           if (!payload.input) {
@@ -696,7 +698,7 @@ ChatGPT request failed: ${errorMessage}
         fields.input_text || fields.prompt || fields.message || undefined;
 
       if (!payload.model) {
-        payload.model = fields.model || "gpt-4o-mini";
+        payload.model = fields.model || defaultModel;
       }
 
       if (!payload.input) {
@@ -785,7 +787,7 @@ ChatGPT request failed: ${errorMessage}
         return;
       }
 
-      const useModel = model ?? "gpt-4o-mini";
+      const useModel = model || defaultModel;
 
       const started = Date.now();
       logInfo(
