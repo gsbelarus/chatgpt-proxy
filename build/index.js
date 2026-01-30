@@ -8,6 +8,7 @@ import fs from "fs/promises";
 import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const defaultModel = "gpt-4.1-mini";
 config({ path: [".env.local", ".env"] });
 const infos = [];
 const errors = [];
@@ -114,7 +115,7 @@ export const server = http.createServer(async (req, res) => {
                 apiKey: process.env.OPENAI_API_KEY,
                 apiBaseUrl: "https://api.openai.com/v1",
                 completionParams: {
-                    model: "gpt-4o-mini",
+                    model: defaultModel,
                     temperature: 1,
                 },
             });
@@ -143,7 +144,7 @@ export const server = http.createServer(async (req, res) => {
                 apiKey: process.env.OPENAI_API_KEY,
             });
             const chatCompletion = await openai.chat.completions.create({
-                model: "gpt-4o-mini",
+                model: defaultModel,
                 messages: [
                     {
                         role: "system",
@@ -288,7 +289,7 @@ export const server = http.createServer(async (req, res) => {
                     }
                     const inputText = fields.input_text || fields.prompt || fields.message || undefined;
                     if (!payload.model) {
-                        payload.model = fields.model || "gpt-4o-mini";
+                        payload.model = fields.model || defaultModel;
                     }
                     if (!payload.input) {
                         payload.input = buildInputWithFiles(inputText, fileIds);
@@ -525,7 +526,7 @@ ChatGPT request failed: ${errorMessage}
             }
             const inputText = fields.input_text || fields.prompt || fields.message || undefined;
             if (!payload.model) {
-                payload.model = fields.model || "gpt-4o-mini";
+                payload.model = fields.model || defaultModel;
             }
             if (!payload.input) {
                 payload.input = buildInputWithFiles(inputText, fileIds);
@@ -594,7 +595,7 @@ ChatGPT request failed: ${errorMessage}
                 res.end("Forbidden");
                 return;
             }
-            const useModel = model ?? "gpt-4o-mini";
+            const useModel = model || defaultModel;
             const started = Date.now();
             logInfo(`model: ${useModel}, temperature: ${temperature}, prompt: ${prompt}`);
             const chatAPI = new ChatGPTAPI({
