@@ -582,6 +582,85 @@ ChatGPT request failed: ${errorMessage}
       res.writeHead(500, { "Content-Type": "text/plain" });
       res.end("Internal Server Error");
     }
+  } else if (req.url === "/openai/files" && req.method === "POST") {
+    try {
+      const fields: Record<string, string> = {};
+      const files: UploadedFile[] = [];
+
+      await new Promise<void>((resolve, reject) => {
+        const busboy = Busboy({ headers: req.headers });
+        busboy.on(
+          "file",
+          (
+            fieldname: string,
+            file: NodeJS.ReadableStream,
+            info: Busboy.FileInfo,
+          ) => {
+            const { filename, mimeType } = info;
+
+            const chunks: Buffer[] = [];
+            file.on("data", (data: Buffer) => chunks.push(data));
+            file.on("end", () => {
+              files.push({
+                fieldname,
+                filename: filename || "file",
+                mimeType: mimeType || "application/octet-stream",
+                buffer: Buffer.concat(chunks),
+              });
+            });
+          },
+        );
+        busboy.on("field", (fieldname, val) => {
+          fields[fieldname] = val;
+        });
+        busboy.on("finish", () => resolve());
+        busboy.on("error", reject);
+        req.pipe(busboy);
+      });
+
+      const security_key = fields.security_key;
+
+      if (security_key !== process.env.SECURITY_KEY) {
+        res.writeHead(403, { "Content-Type": "text/plain" });
+        res.end("Forbidden");
+        return;
+      }
+
+      const openai = new OpenAI({
+        apiKey: process.env.OPENAI_API_KEY as string,
+      });
+
+      for (const f of files) {
+        const arrayBuffer = f.buffer.buffer.slice(
+          f.buffer.byteOffset,
+          f.buffer.byteOffset + f.buffer.byteLength,
+        );
+
+        const blob = new Blob([arrayBuffer as ArrayBuffer], {
+          type: f.mimeType,
+        });
+
+        const file = new File([blob], f.filename, { type: f.mimeType });
+
+        const uploaded = await openai.files.create({
+          file,
+          purpose: "assistants",
+        });
+
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(uploaded.id);
+      }
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+
+      logError(`
+ChatGPT request failed: ${errorMessage}
+`);
+
+      errorCount++;
+      res.writeHead(500, { "Content-Type": "text/plain" });
+      res.end("Internal Server Error");
+    }
   } else if (req.url === "/openai/with-files" && req.method === "POST") {
     let tempDir: string | undefined;
     const tempPaths: string[] = [];

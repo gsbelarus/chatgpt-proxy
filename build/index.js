@@ -253,7 +253,7 @@ export const server = http.createServer(async (req, res) => {
                         project: fields.project || (process.env.OPENAI_PROJECT_KEY ?? null),
                         organization: fields.organization ?? null,
                     });
-                    const purpose = fields.file_purpose || "assistants";
+                    const purpose = fields.file_purpose || "user_data";
                     const tempDir = path.join(__dirname, "temp_files");
                     await fs.mkdir(tempDir, { recursive: true });
                     const uploadedFiles = [];
@@ -318,6 +318,7 @@ export const server = http.createServer(async (req, res) => {
                             payload.input.push(...buildInputWithFiles(inputText, fileIds));
                         }
                     }
+                    console.log("payload", payload);
                     const response = await openai.responses.create(payload);
                     res.writeHead(200, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({
@@ -440,6 +441,81 @@ ChatGPT request failed: ${errorMessage}
             res.end("Internal Server Error");
         }
     }
+    else if (req.url === "/openai/files" && req.method === "POST") {
+        // const {
+        //   security_key,
+        //   openai_api_key,
+        //   project,
+        //   organization,
+        //   timeout,
+        //   image,
+        // } = data;
+        try {
+            const fields = {};
+            const files = [];
+            await new Promise((resolve, reject) => {
+                const busboy = Busboy({ headers: req.headers });
+                busboy.on("file", (fieldname, file, info) => {
+                    const { filename, mimeType } = info;
+                    const chunks = [];
+                    file.on("data", (data) => chunks.push(data));
+                    file.on("end", () => {
+                        files.push({
+                            fieldname,
+                            filename: filename || "file",
+                            mimeType: mimeType || "application/octet-stream",
+                            buffer: Buffer.concat(chunks),
+                        });
+                    });
+                });
+                busboy.on("field", (fieldname, val) => {
+                    fields[fieldname] = val;
+                });
+                busboy.on("finish", () => resolve());
+                busboy.on("error", reject);
+                req.pipe(busboy);
+            });
+            const security_key = fields.security_key;
+            if (security_key !== process.env.SECURITY_KEY) {
+                res.writeHead(403, { "Content-Type": "text/plain" });
+                res.end("Forbidden");
+                return;
+            }
+            const openai = new OpenAI({
+                apiKey: process.env.OPENAI_API_KEY,
+            });
+            for (const f of files) {
+                console.log("create");
+                // Преобразуем Buffer в ArrayBuffer
+                const arrayBuffer = f.buffer.buffer.slice(f.buffer.byteOffset, f.buffer.byteOffset + f.buffer.byteLength);
+                // Создаём Blob
+                const blob = new Blob([arrayBuffer], {
+                    type: f.mimeType,
+                });
+                // Создаём File (Node 18+)
+                const file = new File([blob], f.filename, { type: f.mimeType });
+                const uploaded = await openai.files.create({
+                    file,
+                    purpose: "assistants",
+                });
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(uploaded.id);
+            }
+            // const response = await openai.files.create({
+            //   file: fSync.createReadStream("./data.jsonl"),
+            //   purpose: "assistants",
+            // });
+        }
+        catch (err) {
+            const errorMessage = err instanceof Error ? err.message : String(err);
+            logError(`
+ChatGPT request failed: ${errorMessage}
+`);
+            errorCount++;
+            res.writeHead(500, { "Content-Type": "text/plain" });
+            res.end("Internal Server Error");
+        }
+    }
     else if (req.url === "/openai/with-files" && req.method === "POST") {
         let tempDir;
         const tempPaths = [];
@@ -490,7 +566,7 @@ ChatGPT request failed: ${errorMessage}
                 project: fields.project || (process.env.OPENAI_PROJECT_KEY ?? null),
                 organization: fields.organization ?? null,
             });
-            const purpose = fields.file_purpose || "assistants";
+            const purpose = fields.file_purpose || "user_data";
             tempDir = path.join(__dirname, "temp_files");
             await fs.mkdir(tempDir, { recursive: true });
             const uploadedFiles = [];
