@@ -330,7 +330,7 @@ export const server = http.createServer(async (req, res) => {
             organization: fields.organization ?? null,
           });
 
-          const purpose = fields.file_purpose || "assistants";
+          const purpose = fields.file_purpose || "user_data";
 
           const tempDir = path.join(__dirname, "temp_files");
           await fs.mkdir(tempDir, { recursive: true });
@@ -507,11 +507,11 @@ export const server = http.createServer(async (req, res) => {
                 ? { type: "image_url", image_url: { url: image.url } }
                 : image.base64
                   ? {
-                      type: "image_url",
-                      image_url: {
-                        url: `data:image/png;base64,${image.base64}`,
-                      },
-                    }
+                    type: "image_url",
+                    image_url: {
+                      url: `data:image/png;base64,${image.base64}`,
+                    },
+                  }
                   : undefined,
             ].filter(Boolean),
           });
@@ -647,7 +647,7 @@ ChatGPT request failed: ${errorMessage}
         organization: fields.organization ?? null,
       });
 
-      const purpose = fields.file_purpose || "assistants";
+      const purpose = fields.file_purpose || "user_data";
 
       tempDir = path.join(__dirname, "temp_files");
       await fs.mkdir(tempDir, { recursive: true });
