@@ -510,11 +510,11 @@ export const server = http.createServer(async (req, res) => {
                 ? { type: "image_url", image_url: { url: image.url } }
                 : image.base64
                   ? {
-                      type: "image_url",
-                      image_url: {
-                        url: `data:image/png;base64,${image.base64}`,
-                      },
-                    }
+                    type: "image_url",
+                    image_url: {
+                      url: `data:image/png;base64,${image.base64}`,
+                    },
+                  }
                   : undefined,
             ].filter(Boolean),
           });
@@ -547,12 +547,6 @@ export const server = http.createServer(async (req, res) => {
       }
 
       const chatCompletionText = JSON.stringify(chatCompletion, null, 2);
-
-      if (deleteFilesIds.length) {
-        for (const f of deleteFilesIds) {
-          await openai.files.del(f);
-        }
-      }
 
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(chatCompletionText);
