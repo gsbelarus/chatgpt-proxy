@@ -56,39 +56,6 @@ Returns a simple HTML page to verify the server is running.
 
 ---
 
-### `GET /health`
-
-Health check using the `chatgpt` library. Rate-limited to 1 request per 10 seconds.
-
-**Response:** JSON with the ChatGPT response.
-
----
-
-### `GET /health2`
-
-Health check using the official OpenAI SDK. Rate-limited to 1 request per 10 seconds.
-
-**Response:** JSON with the chat completion response.
-
----
-
-### `GET /log?access_token=123`
-
-View info logs and server metrics. Requires `access_token=123` query parameter.
-
-**Response:** HTML page with:
-- Request count, total/average/max request time
-- Max parallel requests, token usage stats
-- Recent log entries
-
----
-
-### `GET /log_errors?access_token=123`
-
-View error logs. Same format as `/log`.
-
----
-
 ### `POST /openai`
 
 **Main endpoint for OpenAI Chat Completions API.**
