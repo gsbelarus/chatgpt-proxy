@@ -6,6 +6,7 @@ import path from "path";
 import { createReadStream } from "fs";
 import fs from "fs/promises";
 import { fileURLToPath } from "url";
+import { parse } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const defaultModel = "gpt-4.1-mini";
@@ -91,7 +92,7 @@ function buildInputWithFiles(inputText, fileIds) {
 export const server = http.createServer(async (req, res) => {
     // Set CORS headers
     res.setHeader("Access-Control-Allow-Origin", "*"); // Allow all origins
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS"); // Allow specific methods
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS, DELETE"); // Allow specific methods
     res.setHeader("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept"); // Allow specific headers
     if (req.method === "OPTIONS") {
         res.writeHead(200);
@@ -318,7 +319,6 @@ export const server = http.createServer(async (req, res) => {
                             payload.input.push(...buildInputWithFiles(inputText, fileIds));
                         }
                     }
-                    console.log("payload", payload);
                     const response = await openai.responses.create(payload);
                     res.writeHead(200, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({
@@ -360,6 +360,7 @@ export const server = http.createServer(async (req, res) => {
                 organization: organization ?? null,
             });
             let chatCompletion;
+            let deleteFilesIds = [];
             try {
                 currentParallelRequests++;
                 if (currentParallelRequests > maxParallelRequests) {
@@ -390,13 +391,39 @@ export const server = http.createServer(async (req, res) => {
                         ].filter(Boolean),
                     });
                 }
-                chatCompletion =
-                    await openai.chat.completions.create(completionPayload);
+                const messages = completionPayload.messages.map((message) => {
+                    if (Array.isArray(message.content)) {
+                        const content = message.content.map((item) => {
+                            if (item.type === "file" && item.delete_after_use) {
+                                deleteFilesIds.push(item.file.file_id);
+                                const newItem = { ...item };
+                                delete newItem.delete_after_use;
+                                return newItem;
+                            }
+                            else {
+                                return item;
+                            }
+                        });
+                        return { ...message, content };
+                    }
+                    else {
+                        return message;
+                    }
+                });
+                chatCompletion = await openai.chat.completions.create({
+                    ...completionPayload,
+                    messages,
+                });
             }
             finally {
                 currentParallelRequests--;
             }
             const chatCompletionText = JSON.stringify(chatCompletion, null, 2);
+            if (deleteFilesIds.length) {
+                for (const f of deleteFilesIds) {
+                    await openai.files.del(f);
+                }
+            }
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(chatCompletionText);
             createChatCompletionText = JSON.stringify(create_chat_completion, null, 2);
@@ -441,15 +468,7 @@ ChatGPT request failed: ${errorMessage}
             res.end("Internal Server Error");
         }
     }
-    else if (req.url === "/openai/files" && req.method === "POST") {
-        // const {
-        //   security_key,
-        //   openai_api_key,
-        //   project,
-        //   organization,
-        //   timeout,
-        //   image,
-        // } = data;
+    else if (req.url === "/openai/files/create" && req.method === "POST") {
         try {
             const fields = {};
             const files = [];
@@ -484,27 +503,77 @@ ChatGPT request failed: ${errorMessage}
             const openai = new OpenAI({
                 apiKey: process.env.OPENAI_API_KEY,
             });
+            const uploadedFiles = [];
             for (const f of files) {
-                console.log("create");
-                // Преобразуем Buffer в ArrayBuffer
                 const arrayBuffer = f.buffer.buffer.slice(f.buffer.byteOffset, f.buffer.byteOffset + f.buffer.byteLength);
-                // Создаём Blob
                 const blob = new Blob([arrayBuffer], {
                     type: f.mimeType,
                 });
-                // Создаём File (Node 18+)
                 const file = new File([blob], f.filename, { type: f.mimeType });
                 const uploaded = await openai.files.create({
                     file,
                     purpose: "assistants",
                 });
-                res.writeHead(200, { "Content-Type": "application/json" });
-                res.end(uploaded.id);
+                uploadedFiles.push(uploaded.id);
             }
-            // const response = await openai.files.create({
-            //   file: fSync.createReadStream("./data.jsonl"),
-            //   purpose: "assistants",
-            // });
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ uploaded_files: uploadedFiles }));
+        }
+        catch (err) {
+            const errorMessage = err instanceof Error ? err.message : String(err);
+            logError(`
+ChatGPT request failed: ${errorMessage}
+`);
+            errorCount++;
+            res.writeHead(500, { "Content-Type": "text/plain" });
+            res.end("Internal Server Error");
+        }
+    }
+    else if (req.url?.includes("/openai/files/list") && req.method === "GET") {
+        const { query } = parse(req.url, true);
+        const { security_key } = query;
+        if (security_key !== process.env.SECURITY_KEY) {
+            res.writeHead(403, { "Content-Type": "text/plain" });
+            res.end("Forbidden");
+            return;
+        }
+        const openai = new OpenAI({
+            apiKey: process.env.OPENAI_API_KEY,
+        });
+        const files = await openai.files.list();
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ files }));
+    }
+    else if (req.url === "/openai/files/remove" && req.method === "DELETE") {
+        try {
+            const body = await getBody(req);
+            const data = JSON.parse(body);
+            const { security_key, file_ids } = data;
+            if (!file_ids) {
+                res.writeHead(400, { "Content-Type": "text/plain" });
+                res.end("file_ids is required");
+                return;
+            }
+            if (!Array.isArray(file_ids)) {
+                res.writeHead(400, { "Content-Type": "text/plain" });
+                res.end("file_ids must be an array");
+                return;
+            }
+            if (security_key !== process.env.SECURITY_KEY) {
+                res.writeHead(403, { "Content-Type": "text/plain" });
+                res.end("Forbidden");
+                return;
+            }
+            const openai = new OpenAI({
+                apiKey: process.env.OPENAI_API_KEY,
+            });
+            const deletedFiles = [];
+            for (const f of file_ids) {
+                await openai.files.del(f);
+                deletedFiles.push(f);
+            }
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ deleted_files: deletedFiles }));
         }
         catch (err) {
             const errorMessage = err instanceof Error ? err.message : String(err);
