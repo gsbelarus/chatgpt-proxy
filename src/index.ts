@@ -269,6 +269,8 @@ export const server = http.createServer(async (req, res) => {
     const started = Date.now();
     let createChatCompletionText = "";
 
+    let deleteFilesIds: string[] = [];
+
     // This is a ChatGPT v1 API request
     // https://platform.openai.com/docs/api-reference/chat/create
     try {
@@ -485,7 +487,6 @@ export const server = http.createServer(async (req, res) => {
       });
 
       let chatCompletion;
-      let deleteFilesIds: string[] = [];
 
       try {
         currentParallelRequests++;
@@ -609,6 +610,31 @@ ChatGPT request failed: ${errorMessage}
       errorCount++;
       res.writeHead(500, { "Content-Type": "text/plain" });
       res.end("Internal Server Error");
+    } finally {
+      try {
+        const openai = new OpenAI({
+          apiKey: process.env.OPENAI_API_KEY as string,
+        });
+
+        if (deleteFilesIds.length) {
+          for (const f of deleteFilesIds) {
+            await openai.files.del(f);
+          }
+        }
+      } catch (err) {
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        const requestTime = (Date.now() - started) / 1000;
+
+        logError(`
+  ChatGPT delete files after request failed: ${errorMessage}
+
+  <strong>Request #${requestCount}:</strong> ${createChatCompletionText}
+
+  <strong>Request done in ${requestTime.toFixed(1)}s...</strong>
+  `);
+
+        errorCount++;
+      }
     }
   } else if (req.url === "/openai/files/create" && req.method === "POST") {
     try {
