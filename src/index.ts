@@ -1,17 +1,8 @@
 import http from "http";
 import { config } from "dotenv";
-import OpenAI from "openai";
+import OpenAI, { toFile } from "openai";
 import Busboy from "busboy";
-import path from "path";
-import { createReadStream } from "fs";
-import fs from "fs/promises";
-import { fileURLToPath } from "url";
 import { AudioResponseFormat } from "openai/resources";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-const defaultModel = "gpt-4.1-mini";
 
 config({ path: [".env.local", ".env"] });
 
@@ -79,13 +70,6 @@ type ChatGPTRequest = {
   security_key: string;
 };
 
-type UploadedFile = {
-  fieldname: string;
-  filename: string;
-  mimeType: string;
-  buffer: Buffer;
-};
-
 function isChatGPTRequest(object: any): object is ChatGPTRequest {
   return (
     typeof object === "object" &&
@@ -111,22 +95,6 @@ function checkAccess(req: http.IncomingMessage): boolean {
   const searchParams = urlObj.searchParams;
 
   return searchParams.get("access_token") === "123";
-}
-
-function toSafeFilename(filename: string, fallback: string) {
-  const base = path.basename(filename || fallback || "file");
-  return base.replace(/[^a-zA-Z0-9._-]/g, "_");
-}
-
-function buildInputWithFiles(inputText: string | undefined, fileIds: string[]) {
-  const content: Array<{ type: string; text?: string; file_id?: string }> = [];
-  if (inputText && inputText.trim().length > 0) {
-    content.push({ type: "input_text", text: inputText });
-  }
-  for (const fileId of fileIds) {
-    content.push({ type: "input_file", file_id: fileId });
-  }
-  return [{ role: "user", content }];
 }
 
 export const server = http.createServer(async (req, res) => {
@@ -163,7 +131,7 @@ export const server = http.createServer(async (req, res) => {
         apiKey: process.env.OPENAI_API_KEY as string,
         apiBaseUrl: "https://api.openai.com/v1",
         completionParams: {
-          model: defaultModel,
+          model: "gpt-4o-mini",
           temperature: 1,
         },
       });
@@ -195,7 +163,7 @@ export const server = http.createServer(async (req, res) => {
       });
 
       const chatCompletion = await openai.chat.completions.create({
-        model: defaultModel,
+        model: "gpt-4o-mini",
         messages: [
           {
             role: "system",
@@ -217,6 +185,10 @@ export const server = http.createServer(async (req, res) => {
       res.end("Internal Server Error");
     }
   } else if (req.url?.startsWith("/log")) {
+    res.writeHead(403, { "Content-Type": "text/plain" });
+    res.end("Forbidden");
+    return;
+
     if (!checkAccess(req)) {
       res.writeHead(403, { "Content-Type": "text/plain" });
       res.end("Forbidden");
@@ -271,190 +243,6 @@ export const server = http.createServer(async (req, res) => {
     // This is a ChatGPT v1 API request
     // https://platform.openai.com/docs/api-reference/chat/create
     try {
-      const contentType = req.headers["content-type"] || "";
-      if (contentType.startsWith("multipart/form-data")) {
-        const tempPaths: string[] = [];
-
-        try {
-          const fields: Record<string, string> = {};
-          const files: UploadedFile[] = [];
-
-          await new Promise<void>((resolve, reject) => {
-            const busboy = Busboy({ headers: req.headers });
-            busboy.on(
-              "file",
-              (
-                fieldname: string,
-                file: NodeJS.ReadableStream,
-                info: Busboy.FileInfo,
-              ) => {
-                const { filename, mimeType } = info;
-
-                const chunks: Buffer[] = [];
-                file.on("data", (data: Buffer) => chunks.push(data));
-                file.on("end", () => {
-                  files.push({
-                    fieldname,
-                    filename: filename || "file",
-                    mimeType: mimeType || "application/octet-stream",
-                    buffer: Buffer.concat(chunks),
-                  });
-                });
-              },
-            );
-            busboy.on("field", (fieldname, val) => {
-              fields[fieldname] = val;
-            });
-            busboy.on("finish", () => resolve());
-            busboy.on("error", reject);
-            req.pipe(busboy);
-          });
-
-          const security_key = fields.security_key || "";
-          if (security_key !== process.env.SECURITY_KEY) {
-            res.writeHead(403, { "Content-Type": "text/plain" });
-            res.end("Forbidden");
-            return;
-          }
-
-          if (files.length === 0) {
-            res.writeHead(400, { "Content-Type": "text/plain" });
-            res.end("No files uploaded");
-            return;
-          }
-
-          const openai = new OpenAI({
-            apiKey:
-              fields.openai_api_key || (process.env.OPENAI_API_KEY as string),
-            project: fields.project || (process.env.OPENAI_PROJECT_KEY ?? null),
-            organization: fields.organization ?? null,
-          });
-
-          const purpose = fields.file_purpose || "user_data";
-
-          const tempDir = path.join(__dirname, "temp_files");
-          await fs.mkdir(tempDir, { recursive: true });
-
-          const uploadedFiles: Array<{
-            file_id: string;
-            filename: string;
-            mimeType: string;
-            size: number;
-          }> = [];
-
-          for (let i = 0; i < files.length; i += 1) {
-            const item = files[i];
-            const safeName = toSafeFilename(item.filename, `file_${i}`);
-            const tempPath = path.join(
-              tempDir,
-              `${Date.now()}_${i}_${safeName}`,
-            );
-
-            await fs.writeFile(tempPath, item.buffer);
-            tempPaths.push(tempPath);
-
-            const fileStream = createReadStream(tempPath);
-            const uploaded = await openai.files.create({
-              file: fileStream,
-              purpose: purpose as any,
-            });
-
-            uploadedFiles.push({
-              file_id: uploaded.id,
-              filename: item.filename,
-              mimeType: item.mimeType,
-              size: item.buffer.length,
-            });
-          }
-
-          const fileIds = uploadedFiles.map((item) => item.file_id);
-
-          let payload: any = {};
-          if (fields.payload) {
-            try {
-              payload = JSON.parse(fields.payload);
-            } catch (err) {
-              res.writeHead(400, { "Content-Type": "text/plain" });
-              res.end("Invalid JSON in payload field");
-              return;
-            }
-          }
-
-          const inputText =
-            fields.input_text || fields.prompt || fields.message || undefined;
-
-          if (!payload.model) {
-            payload.model = fields.model || defaultModel;
-          }
-
-          if (!payload.input) {
-            payload.input = buildInputWithFiles(inputText, fileIds);
-          } else if (typeof payload.input === "string") {
-            payload.input = buildInputWithFiles(payload.input, fileIds);
-          } else if (Array.isArray(payload.input)) {
-            const firstWithContent = payload.input.find(
-              (item: any) => item && Array.isArray(item.content),
-            );
-
-            if (firstWithContent) {
-              if (
-                inputText &&
-                !firstWithContent.content.some(
-                  (c: any) => c?.type === "input_text",
-                )
-              ) {
-                firstWithContent.content.unshift({
-                  type: "input_text",
-                  text: inputText,
-                });
-              }
-
-              for (const fileId of fileIds) {
-                firstWithContent.content.push({
-                  type: "input_file",
-                  file_id: fileId,
-                });
-              }
-            } else {
-              payload.input.push(...buildInputWithFiles(inputText, fileIds));
-            }
-          }
-
-          const response = await openai.responses.create(payload);
-
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(
-            JSON.stringify(
-              {
-                response,
-                uploaded_files: uploadedFiles,
-              },
-              null,
-              2,
-            ),
-          );
-        } catch (err: unknown) {
-          const errorMessage = err instanceof Error ? err.message : String(err);
-          logError(`OpenAI multipart request failed: ${errorMessage}`);
-          res.writeHead(500, { "Content-Type": "text/plain" });
-          res.end("Internal Server Error");
-        } finally {
-          for (const tempPath of tempPaths) {
-            try {
-              await fs.unlink(tempPath);
-            } catch (err) {
-              const errorMessage =
-                err instanceof Error ? err.message : String(err);
-              logError(
-                `Failed to delete temp file ${tempPath}: ${errorMessage}`,
-              );
-            }
-          }
-        }
-
-        return;
-      }
-
       const body = await getBody(req);
 
       //logInfo(`ChatGPT request text: ${body}`);
@@ -492,29 +280,53 @@ export const server = http.createServer(async (req, res) => {
           maxParallelRequests = currentParallelRequests;
         }
 
-        // If there is image, add it to messages
+        // If there is image, add it to messages per Chat Completions schema
         let completionPayload = { ...create_chat_completion };
+
+        if (completionPayload.stream) {
+          res.writeHead(400, { "Content-Type": "text/plain" });
+          res.end("Streaming is not supported on this endpoint");
+          return;
+        }
+
         if (image) {
+          const imagePart = image.url
+            ? { type: "image_url", image_url: { url: image.url } }
+            : image.base64
+              ? {
+                  type: "image_url",
+                  image_url: { url: `data:image/png;base64,${image.base64}` },
+                }
+              : null;
+
+          if (!imagePart) {
+            res.writeHead(400, { "Content-Type": "text/plain" });
+            res.end("Invalid image payload");
+            return;
+          }
+
           if (!completionPayload.messages) completionPayload.messages = [];
-          completionPayload.messages.push({
-            role: "user",
-            content: [
-              {
-                type: "text",
-                text: create_chat_completion.messages?.[0]?.content || "",
-              },
-              image.url
-                ? { type: "image_url", image_url: { url: image.url } }
-                : image.base64
-                  ? {
-                    type: "image_url",
-                    image_url: {
-                      url: `data:image/png;base64,${image.base64}`,
-                    },
-                  }
-                  : undefined,
-            ].filter(Boolean),
-          });
+
+          const lastMessage =
+            completionPayload.messages[completionPayload.messages.length - 1];
+
+          if (lastMessage?.role === "user") {
+            if (typeof lastMessage.content === "string") {
+              lastMessage.content = [
+                { type: "text", text: lastMessage.content },
+                imagePart,
+              ];
+            } else if (Array.isArray(lastMessage.content)) {
+              lastMessage.content = [...lastMessage.content, imagePart];
+            } else {
+              lastMessage.content = [imagePart];
+            }
+          } else {
+            completionPayload.messages.push({
+              role: "user",
+              content: [imagePart],
+            });
+          }
         }
 
         chatCompletion =
@@ -582,184 +394,6 @@ ChatGPT request failed: ${errorMessage}
       res.writeHead(500, { "Content-Type": "text/plain" });
       res.end("Internal Server Error");
     }
-  } else if (req.url === "/openai/with-files" && req.method === "POST") {
-    let tempDir: string | undefined;
-    const tempPaths: string[] = [];
-
-    try {
-      const contentType = req.headers["content-type"] || "";
-      if (!contentType.startsWith("multipart/form-data")) {
-        res.writeHead(400, { "Content-Type": "text/plain" });
-        res.end("Content-Type must be multipart/form-data");
-        return;
-      }
-
-      const fields: Record<string, string> = {};
-      const files: UploadedFile[] = [];
-
-      await new Promise<void>((resolve, reject) => {
-        const busboy = Busboy({ headers: req.headers });
-        busboy.on(
-          "file",
-          (
-            fieldname: string,
-            file: NodeJS.ReadableStream,
-            info: Busboy.FileInfo,
-          ) => {
-            const { filename, mimeType } = info;
-
-            const chunks: Buffer[] = [];
-            file.on("data", (data: Buffer) => chunks.push(data));
-            file.on("end", () => {
-              files.push({
-                fieldname,
-                filename: filename || "file",
-                mimeType: mimeType || "application/octet-stream",
-                buffer: Buffer.concat(chunks),
-              });
-            });
-          },
-        );
-        busboy.on("field", (fieldname, val) => {
-          fields[fieldname] = val;
-        });
-        busboy.on("finish", () => resolve());
-        busboy.on("error", reject);
-        req.pipe(busboy);
-      });
-
-      const security_key = fields.security_key || "";
-      if (security_key !== process.env.SECURITY_KEY) {
-        res.writeHead(403, { "Content-Type": "text/plain" });
-        res.end("Forbidden");
-        return;
-      }
-
-      if (files.length === 0) {
-        res.writeHead(400, { "Content-Type": "text/plain" });
-        res.end("No files uploaded");
-        return;
-      }
-
-      const openai = new OpenAI({
-        apiKey: fields.openai_api_key || (process.env.OPENAI_API_KEY as string),
-        project: fields.project || (process.env.OPENAI_PROJECT_KEY ?? null),
-        organization: fields.organization ?? null,
-      });
-
-      const purpose = fields.file_purpose || "user_data";
-
-      tempDir = path.join(__dirname, "temp_files");
-      await fs.mkdir(tempDir, { recursive: true });
-
-      const uploadedFiles: Array<{
-        file_id: string;
-        filename: string;
-        mimeType: string;
-        size: number;
-      }> = [];
-
-      for (let i = 0; i < files.length; i += 1) {
-        const item = files[i];
-        const safeName = toSafeFilename(item.filename, `file_${i}`);
-        const tempPath = path.join(tempDir, `${Date.now()}_${i}_${safeName}`);
-
-        await fs.writeFile(tempPath, item.buffer);
-        tempPaths.push(tempPath);
-
-        const fileStream = createReadStream(tempPath);
-        const uploaded = await openai.files.create({
-          file: fileStream,
-          purpose: purpose as any,
-        });
-
-        uploadedFiles.push({
-          file_id: uploaded.id,
-          filename: item.filename,
-          mimeType: item.mimeType,
-          size: item.buffer.length,
-        });
-      }
-
-      const fileIds = uploadedFiles.map((item) => item.file_id);
-
-      let payload: any = {};
-      if (fields.payload) {
-        try {
-          payload = JSON.parse(fields.payload);
-        } catch (err) {
-          res.writeHead(400, { "Content-Type": "text/plain" });
-          res.end("Invalid JSON in payload field");
-          return;
-        }
-      }
-
-      const inputText =
-        fields.input_text || fields.prompt || fields.message || undefined;
-
-      if (!payload.model) {
-        payload.model = fields.model || defaultModel;
-      }
-
-      if (!payload.input) {
-        payload.input = buildInputWithFiles(inputText, fileIds);
-      } else if (typeof payload.input === "string") {
-        payload.input = buildInputWithFiles(payload.input, fileIds);
-      } else if (Array.isArray(payload.input)) {
-        const firstWithContent = payload.input.find(
-          (item: any) => item && Array.isArray(item.content),
-        );
-
-        if (firstWithContent) {
-          if (
-            inputText &&
-            !firstWithContent.content.some((c: any) => c?.type === "input_text")
-          ) {
-            firstWithContent.content.unshift({
-              type: "input_text",
-              text: inputText,
-            });
-          }
-
-          for (const fileId of fileIds) {
-            firstWithContent.content.push({
-              type: "input_file",
-              file_id: fileId,
-            });
-          }
-        } else {
-          payload.input.push(...buildInputWithFiles(inputText, fileIds));
-        }
-      }
-
-      const response = await openai.responses.create(payload);
-
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(
-        JSON.stringify(
-          {
-            response,
-            uploaded_files: uploadedFiles,
-          },
-          null,
-          2,
-        ),
-      );
-    } catch (err: unknown) {
-      const errorMessage = err instanceof Error ? err.message : String(err);
-      logError(`OpenAI files request failed: ${errorMessage}`);
-      res.writeHead(500, { "Content-Type": "text/plain" });
-      res.end("Internal Server Error");
-    } finally {
-      for (const tempPath of tempPaths) {
-        try {
-          await fs.unlink(tempPath);
-        } catch (err) {
-          const errorMessage = err instanceof Error ? err.message : String(err);
-          logError(`Failed to delete temp file ${tempPath}: ${errorMessage}`);
-        }
-      }
-    }
   } else if (req.url === "/chatgpt" && req.method === "POST") {
     try {
       const body = await getBody(req);
@@ -787,7 +421,7 @@ ChatGPT request failed: ${errorMessage}
         return;
       }
 
-      const useModel = model || defaultModel;
+      const useModel = model ?? "gpt-4o-mini";
 
       const started = Date.now();
       logInfo(
@@ -829,8 +463,6 @@ ChatGPT request failed: ${errorMessage}
     req.url === "/openai/audio/transcriptions" &&
     req.method === "POST"
   ) {
-    let tempDir;
-    let tempPath;
     try {
       // Get the audio file from the request body (expects multipart/form-data)
       const contentType = req.headers["content-type"] || "";
@@ -912,15 +544,11 @@ ChatGPT request failed: ${errorMessage}
         organization: organization ?? null,
       });
 
-      tempDir = path.join(__dirname, "temp_audio");
-      tempPath = path.join(tempDir, audioFilename);
+      // Convert buffer to file without writing to disk
+      const audioFile = await toFile(audioBuffer, audioFilename);
 
-      await fs.mkdir(tempDir, { recursive: true });
-      await fs.writeFile(tempPath, audioBuffer);
-
-      const audioStream = createReadStream(tempPath);
       const transcription = await openai.audio.transcriptions.create({
-        file: audioStream,
+        file: audioFile,
         model,
         response_format,
         language,
@@ -936,15 +564,6 @@ ChatGPT request failed: ${errorMessage}
       logError(`Audio transcription failed: ${errorMessage}`);
       res.writeHead(500, { "Content-Type": "text/plain" });
       res.end("Internal Server Error");
-    } finally {
-      if (tempPath) {
-        try {
-          await fs.unlink(tempPath);
-        } catch (err) {
-          const errorMessage = err instanceof Error ? err.message : String(err);
-          logError(`Failed to delete temp file ${tempPath}: ${errorMessage}`);
-        }
-      }
     }
   } else if (req.url === "/embeddings" && req.method === "POST") {
     try {
