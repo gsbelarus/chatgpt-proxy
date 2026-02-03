@@ -6,6 +6,8 @@ import { AudioResponseFormat } from "openai/resources";
 
 config({ path: [".env.local", ".env"] });
 
+const defaultModel = "gpt-5-nano";
+
 type LogEntry = {
   type: "ERROR" | "INFO" | "DEBUG";
   message: string;
@@ -131,7 +133,7 @@ export const server = http.createServer(async (req, res) => {
         apiKey: process.env.OPENAI_API_KEY as string,
         apiBaseUrl: "https://api.openai.com/v1",
         completionParams: {
-          model: "gpt-4o-mini",
+          model: defaultModel,
           temperature: 1,
         },
       });
@@ -163,7 +165,7 @@ export const server = http.createServer(async (req, res) => {
       });
 
       const chatCompletion = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
+        model: defaultModel,
         messages: [
           {
             role: "system",
@@ -294,9 +296,9 @@ export const server = http.createServer(async (req, res) => {
             ? { type: "image_url", image_url: { url: image.url } }
             : image.base64
               ? {
-                  type: "image_url",
-                  image_url: { url: `data:image/png;base64,${image.base64}` },
-                }
+                type: "image_url",
+                image_url: { url: `data:image/png;base64,${image.base64}` },
+              }
               : null;
 
           if (!imagePart) {
@@ -421,7 +423,7 @@ ChatGPT request failed: ${errorMessage}
         return;
       }
 
-      const useModel = model ?? "gpt-4o-mini";
+      const useModel = model ?? defaultModel;
 
       const started = Date.now();
       logInfo(
