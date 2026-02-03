@@ -1,425 +1,358 @@
 # chatgpt-proxy
 
-Прокси-сервис для OpenAI/ChatGPT с REST-эндпоинтами.
+A lightweight HTTP proxy server for OpenAI APIs. It wraps the official OpenAI SDK and exposes simplified endpoints for chat completions, audio transcriptions, and embeddings with built-in authentication, logging, and metrics.
 
-## Переменные окружения
+## Features
 
-- `OPENAI_API_KEY` — ключ OpenAI (обязателен, если не передаётся в запросе)
-- `OPENAI_PROJECT_KEY` — ключ проекта (опционально)
-- `SECURITY_KEY` — секрет для доступа к прокси (обязателен)
-
-## Общие правила
-
-- Авторизация: передавайте `security_key` в теле запроса или форме.
-- Таймаут сервера: 15 минут.
-- CORS включён для всех источников.
-
-## Эндпоинты
-
-### GET /
-
-Проверка доступности сервиса.
-
-**Ответ**: HTML-страница.
+- **Chat Completions** — Full OpenAI Chat Completions API support including vision (images)
+- **Audio Transcriptions** — Whisper-based speech-to-text
+- **Embeddings** — Generate text embeddings
+- **Simple Chat** — Simplified `/chatgpt` endpoint for quick prompts
+- **Health Checks** — Built-in health endpoints
+- **Logging & Metrics** — Request/response logs, token usage stats, error tracking
+- **CORS** — Enabled for all origins
 
 ---
 
-### POST /openai
-
-Проксирует OpenAI Chat Completions API.
-
-**Content-Type**: `application/json` **или** `multipart/form-data`
-
-**Тело запроса** (JSON):
-
-- `security_key` (string, обязательный)
-- `openai_api_key` (string, опционально)
-- `project` (string, опционально)
-- `organization` (string, опционально)
-- `image` (object, опционально) — поддержка одного изображения:
-	- `url` (string) или `base64` (string)
-- Любые остальные поля будут переданы в `openai.chat.completions.create` как есть
-
-**Пример**:
-
-```
-POST /openai
-Content-Type: application/json
-
-{
-	"security_key": "...",
-	"model": "gpt-4o-mini",
-	"messages": [
-		{ "role": "user", "content": "Привет!" }
-	]
-}
-```
-
-**Ответ**: JSON ответа OpenAI Chat Completions.
-
-**Пример (TypeScript fetch, JSON без файлов)**:
-
-```ts
-type ChatCompletionsResponse = {
-	id: string;
-	choices: Array<{
-		message?: { role: string; content?: string };
-		finish_reason?: string;
-	}>;
-};
-
-async function callOpenAIJson(): Promise<void> {
-	const response = await fetch("http://localhost:3002/openai", {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({
-			security_key: "YOUR_KEY",
-			model: "gpt-4o-mini",
-			messages: [{ role: "user", content: "Привет!" }],
-		}),
-	});
-
-	if (!response.ok) {
-		const text = await response.text();
-		throw new Error(`HTTP ${response.status}: ${text}`);
-	}
-
-	const data = (await response.json()) as ChatCompletionsResponse;
-	const answer = data.choices?.[0]?.message?.content ?? "";
-	console.log("Answer:", answer);
-}
-```
-
-**Дополнительно (multipart/form-data с файлами)**:
-
-Если запрос отправлен как `multipart/form-data` и содержит файлы, эндпоинт:
-
-- загружает файлы через OpenAI Files API,
-- вызывает `openai.responses.create`,
-- прикладывает файлы в `input`.
-
-**Поля формы**:
-
-- `security_key` (string, обязательный)
-- `openai_api_key` (string, опционально)
-- `project` (string, опционально)
-- `organization` (string, опционально)
-- `model` (string, опционально; по умолчанию `gpt-4o-mini`)
-- `input_text` (string, опционально)
-- `payload` (string, JSON, опционально) — payload для `openai.responses.create`
-- `file_purpose` (string, опционально; по умолчанию `assistants`)
-
-**Файлы**:
-
-- Любое количество файлов (любой fieldname)
-
-**Ответ**: JSON c полями `response` и `uploaded_files`.
-
-**Пример (TypeScript fetch, multipart с файлами)**:
-
-```ts
-type ResponsesWithFiles = {
-	response: {
-		id: string;
-		output?: Array<{ content?: Array<{ type: string; text?: string }> }>;
-	};
-	uploaded_files: Array<{
-		file_id: string;
-		filename: string;
-		mimeType: string;
-		size: number;
-	}>;
-};
-
-async function callOpenAIWithFiles(files: File[]): Promise<void> {
-	const form = new FormData();
-	form.set("security_key", "YOUR_KEY");
-	form.set("model", "gpt-4o-mini");
-	form.set("input_text", "Сделай краткое резюме документов");
-
-	for (const file of files) {
-		form.append("files", file, file.name);
-	}
-
-	const response = await fetch("http://localhost:3002/openai", {
-		method: "POST",
-		body: form,
-	});
-
-	if (!response.ok) {
-		const text = await response.text();
-		throw new Error(`HTTP ${response.status}: ${text}`);
-	}
-
-	const data = (await response.json()) as ResponsesWithFiles;
-	const firstOutput = data.response.output?.[0]?.content?.[0]?.text ?? "";
-	console.log("Answer:", firstOutput);
-	console.log("Uploaded:", data.uploaded_files);
-}
-```
-
----
-
-### POST /openai/with-files
-
-Позволяет отправлять массив файлов вместе с запросом. Файлы могут быть любыми: JPG, PNG, PDF, DOC, XLS и т.д.
-
-**Content-Type**: `multipart/form-data`
-
-**Поля формы**:
-
-- `security_key` (string, обязательный)
-- `openai_api_key` (string, опционально)
-- `project` (string, опционально)
-- `organization` (string, опционально)
-- `model` (string, опционально; по умолчанию `gpt-4o-mini`)
-- `input_text` (string, опционально) — текст вопроса/инструкции
-- `payload` (string, JSON, опционально) — полный payload для `openai.responses.create`
-- `file_purpose` (string, опционально; по умолчанию `assistants`)
-
-**Файлы**:
-
-- Передайте один или несколько файлов как `files` или `files[]` (любой fieldname допустим — будут приняты все файловые части).
-
-**Как формируется запрос к OpenAI**:
-
-- Файлы сначала загружаются в OpenAI Files API.
-- Затем создаётся запрос `openai.responses.create`.
-- Если `payload` не указан, создаётся стандартный `input` с текстом и файлами.
-- Если `payload` указан, файлы будут добавлены в `input` (первый элемент с `content`).
-
-**Пример (cURL)**:
+## Installation
 
 ```bash
-curl -X POST http://localhost:3002/openai/with-files \
-  -F "security_key=YOUR_KEY" \
-  -F "model=gpt-4o-mini" \
-  -F "input_text=Сделай краткое резюме документов" \
-  -F "files=@./docs/contract.pdf" \
-  -F "files=@./docs/report.docx"
+npm install
 ```
 
-**Пример (TypeScript fetch)**:
+## Configuration
 
-```ts
-type ResponsesWithFiles = {
-  response: {
-    id: string;
-    output?: Array<{ content?: Array<{ type: string; text?: string }> }>;
-  };
-  uploaded_files: Array<{
-    file_id: string;
-    filename: string;
-    mimeType: string;
-    size: number;
-  }>;
-};
+Create a `.env` or `.env.local` file in the project root:
 
-async function analyzeDocuments(
-  files: File[],
-  instruction: string
-): Promise<string> {
-  const form = new FormData();
-  form.set("security_key", "YOUR_KEY");
-  form.set("model", "gpt-4o-mini");
-  form.set("input_text", instruction);
-
-  for (const file of files) {
-    form.append("files", file, file.name);
-  }
-
-  const response = await fetch("http://localhost:3002/openai/with-files", {
-    method: "POST",
-    body: form,
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`HTTP ${response.status}: ${text}`);
-  }
-
-  const data = (await response.json()) as ResponsesWithFiles;
-  const firstOutput = data.response.output?.[0]?.content?.[0]?.text ?? "";
-  console.log("Uploaded files:", data.uploaded_files);
-  return firstOutput;
-}
+```env
+OPENAI_API_KEY=sk-...
+OPENAI_PROJECT_KEY=proj_...      # Optional
+SECURITY_KEY=your-secret-key     # Required for authenticated endpoints
 ```
 
-**Ответ**:
+## Running
+
+**Development (with hot reload):**
+
+```bash
+npm run local:watch
+```
+
+**Production:**
+
+```bash
+npm run start
+```
+
+The server starts on **http://localhost:3002** by default.
+
+---
+
+## API Endpoints
+
+### `GET /`
+
+Returns a simple HTML page to verify the server is running.
+
+---
+
+### `GET /health`
+
+Health check using the `chatgpt` library. Rate-limited to 1 request per 10 seconds.
+
+**Response:** JSON with the ChatGPT response.
+
+---
+
+### `GET /health2`
+
+Health check using the official OpenAI SDK. Rate-limited to 1 request per 10 seconds.
+
+**Response:** JSON with the chat completion response.
+
+---
+
+### `GET /log?access_token=123`
+
+View info logs and server metrics. Requires `access_token=123` query parameter.
+
+**Response:** HTML page with:
+- Request count, total/average/max request time
+- Max parallel requests, token usage stats
+- Recent log entries
+
+---
+
+### `GET /log_errors?access_token=123`
+
+View error logs. Same format as `/log`.
+
+---
+
+### `POST /openai`
+
+**Main endpoint for OpenAI Chat Completions API.**
+
+Proxies requests to `POST https://api.openai.com/v1/chat/completions`.
+
+#### Request Body (JSON)
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `security_key` | string | ✅ | Must match `SECURITY_KEY` env variable |
+| `openai_api_key` | string | ❌ | Override the default API key |
+| `project` | string | ❌ | OpenAI project ID |
+| `organization` | string | ❌ | OpenAI organization ID |
+| `image` | object | ❌ | Image for vision models (see below) |
+| `model` | string | ✅ | Model ID (e.g., `gpt-4o`, `gpt-4o-mini`) |
+| `messages` | array | ✅ | Array of message objects |
+| `temperature` | number | ❌ | Sampling temperature (0-2) |
+| `top_p` | number | ❌ | Nucleus sampling (0-1) |
+| `max_tokens` | number | ❌ | Max tokens to generate |
+| `max_completion_tokens` | number | ❌ | Max completion tokens |
+| ... | ... | ❌ | Any other Chat Completions API parameters |
+
+> **Note:** `stream: true` is not supported on this endpoint.
+
+#### Image Object
 
 ```json
 {
-  "response": { ... },
-  "uploaded_files": [
-    {
-      "file_id": "file_...",
-      "filename": "contract.pdf",
-      "mimeType": "application/pdf",
-      "size": 12345
+  "url": "https://example.com/image.png"
+}
+```
+
+or
+
+```json
+{
+  "base64": "iVBORw0KGgoAAAANSUhEUg..."
+}
+```
+
+#### Example Request
+
+```bash
+curl -X POST http://localhost:3002/openai \
+  -H "Content-Type: application/json" \
+  -d '{
+    "security_key": "your-secret-key",
+    "model": "gpt-4o-mini",
+    "messages": [
+      {"role": "system", "content": "You are a helpful assistant."},
+      {"role": "user", "content": "What is TypeScript?"}
+    ],
+    "temperature": 0.7,
+    "max_tokens": 500
+  }'
+```
+
+#### Example with Image (Vision)
+
+```bash
+curl -X POST http://localhost:3002/openai \
+  -H "Content-Type: application/json" \
+  -d '{
+    "security_key": "your-secret-key",
+    "model": "gpt-4o",
+    "messages": [
+      {"role": "user", "content": "What is in this image?"}
+    ],
+    "image": {
+      "url": "https://upload.wikimedia.org/wikipedia/commons/thumb/a/a7/Camponotus_flavomarginatus_ant.jpg/800px-Camponotus_flavomarginatus_ant.jpg"
     }
-  ]
-}
+  }'
 ```
 
----
+#### Response
 
-### POST /chatgpt
+Standard OpenAI Chat Completion response:
 
-Проксирует библиотеку `chatgpt` (legacy-режим).
-
-**Content-Type**: `application/json`
-
-**Тело запроса** (JSON):
-
-- `prompt` (string, обязательный)
-- `security_key` (string, обязательный)
-- `model` (string, опционально; по умолчанию `gpt-4o-mini`)
-- `temperature` (number, опционально; 0–2, по умолчанию 1)
-- `top_p` (number, опционально; 0–1, по умолчанию 1)
-- `max_tokens`, `max_completion_tokens` (number, опционально)
-
-**Ответ**: JSON ответа модели.
-
-**Пример (TypeScript fetch)**:
-
-```ts
-type ChatGPTResponse = {
-  id: string;
-  text: string;
-  role: string;
-};
-
-async function callChatGPT(prompt: string): Promise<string> {
-  const response = await fetch("http://localhost:3002/chatgpt", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      security_key: "YOUR_KEY",
-      prompt,
-      model: "gpt-4o-mini",
-      temperature: 0.7,
-    }),
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`HTTP ${response.status}: ${text}`);
-  }
-
-  const data = (await response.json()) as ChatGPTResponse;
-  return data.text;
-}
-```
-
----
-
-### POST /openai/audio/transcriptions
-
-Распознавание аудио (Whisper).
-
-**Content-Type**: `multipart/form-data`
-
-**Поля формы**:
-
-- `security_key` (string, обязательный)
-- `openai_api_key`, `project`, `organization` (опционально)
-- `model` (string, по умолчанию `whisper-1`)
-- `language`, `prompt`, `temperature`, `response_format`
-- `timestamp_granularities[]` (можно указать несколько)
-
-**Файл**:
-
-- Один аудиофайл в `file` (или любой file field)
-
-**Ответ**: JSON результата транскрипции.
-
-**Пример (TypeScript fetch)**:
-
-```ts
-type TranscriptionResponse = {
-  text: string;
-  language?: string;
-  duration?: number;
-  words?: Array<{ word: string; start: number; end: number }>;
-  segments?: Array<{ text: string; start: number; end: number }>;
-};
-
-async function transcribeAudio(audioFile: File): Promise<string> {
-  const form = new FormData();
-  form.set("security_key", "YOUR_KEY");
-  form.set("model", "whisper-1");
-  form.set("language", "ru");
-  form.set("response_format", "verbose_json");
-  form.append("file", audioFile, audioFile.name);
-
-  const response = await fetch(
-    "http://localhost:3002/openai/audio/transcriptions",
+```json
+{
+  "id": "chatcmpl-...",
+  "object": "chat.completion",
+  "created": 1234567890,
+  "model": "gpt-4o-mini",
+  "choices": [
     {
-      method: "POST",
-      body: form,
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "TypeScript is..."
+      },
+      "finish_reason": "stop"
     }
-  );
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`HTTP ${response.status}: ${text}`);
+  ],
+  "usage": {
+    "prompt_tokens": 25,
+    "completion_tokens": 100,
+    "total_tokens": 125
   }
-
-  const data = (await response.json()) as TranscriptionResponse;
-  return data.text;
 }
 ```
 
 ---
 
-### POST /embeddings
+### `POST /chatgpt`
 
-Проксирует OpenAI Embeddings API.
+**Simplified chat endpoint** using the `chatgpt` library.
 
-**Content-Type**: `application/json`
+#### Request Body (JSON)
 
-**Тело запроса** (JSON):
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `security_key` | string | ✅ | Must match `SECURITY_KEY` env variable |
+| `prompt` | string | ✅ | The user message |
+| `model` | string | ❌ | Model ID (default: `gpt-4o-mini`) |
+| `temperature` | number | ❌ | Sampling temperature (0-2) |
+| `top_p` | number | ❌ | Nucleus sampling (0-1) |
+| `max_tokens` | number | ❌ | Max tokens to generate |
+| `max_completion_tokens` | number | ❌ | Max completion tokens |
 
-- `security_key` (string, обязательный)
-- `input` (string | string[] | number[] | number[][]) — данные для эмбеддингов
-- `model` (string, опционально; по умолчанию `text-embedding-3-large`)
-- `dimensions` (number, опционально)
-- `encoding_format` (string, опционально)
+#### Example Request
 
-**Ответ**: JSON эмбеддингов.
+```bash
+curl -X POST http://localhost:3002/chatgpt \
+  -H "Content-Type: application/json" \
+  -d '{
+    "security_key": "your-secret-key",
+    "prompt": "Explain quantum computing in simple terms",
+    "model": "gpt-4o-mini",
+    "temperature": 0.8
+  }'
+```
 
-**Пример (TypeScript fetch)**:
+---
 
-```ts
-type EmbeddingsResponse = {
-  object: string;
-  data: Array<{
-    object: string;
-    index: number;
-    embedding: number[];
-  }>;
-  model: string;
-  usage: { prompt_tokens: number; total_tokens: number };
-};
+### `POST /openai/audio/transcriptions`
 
-async function getEmbeddings(texts: string[]): Promise<number[][]> {
-  const response = await fetch("http://localhost:3002/embeddings", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      security_key: "YOUR_KEY",
-      input: texts,
-      model: "text-embedding-3-large",
-      dimensions: 1024,
-    }),
-  });
+**Audio transcription** using OpenAI Whisper.
 
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`HTTP ${response.status}: ${text}`);
-  }
+#### Request (multipart/form-data)
 
-  const data = (await response.json()) as EmbeddingsResponse;
-  return data.data.map((item) => item.embedding);
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `file` | file | ✅ | Audio file (wav, mp3, m4a, etc.) |
+| `security_key` | string | ✅ | Must match `SECURITY_KEY` env variable |
+| `openai_api_key` | string | ❌ | Override the default API key |
+| `project` | string | ❌ | OpenAI project ID |
+| `organization` | string | ❌ | OpenAI organization ID |
+| `model` | string | ❌ | Model ID (default: `whisper-1`) |
+| `language` | string | ❌ | Language code (e.g., `en`, `es`) |
+| `prompt` | string | ❌ | Optional prompt to guide transcription |
+| `temperature` | number | ❌ | Sampling temperature (default: 0) |
+| `response_format` | string | ❌ | `json`, `text`, `srt`, `verbose_json`, `vtt` |
+| `timestamp_granularities[]` | string | ❌ | `word` and/or `segment` |
+
+#### Example Request
+
+```bash
+curl -X POST http://localhost:3002/openai/audio/transcriptions \
+  -F "file=@audio.mp3" \
+  -F "security_key=your-secret-key" \
+  -F "model=whisper-1" \
+  -F "language=en" \
+  -F "response_format=json"
+```
+
+#### Response
+
+```json
+{
+  "text": "Hello, this is a transcription of the audio file."
 }
 ```
+
+---
+
+### `POST /embeddings`
+
+**Generate text embeddings.**
+
+#### Request Body (JSON)
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `security_key` | string | ✅ | Must match `SECURITY_KEY` env variable |
+| `input` | string or array | ✅ | Text(s) to embed |
+| `model` | string | ❌ | Model ID (default: `text-embedding-3-large`) |
+| `dimensions` | number | ❌ | Output dimensions |
+| `encoding_format` | string | ❌ | `float` or `base64` |
+
+#### Example Request
+
+```bash
+curl -X POST http://localhost:3002/embeddings \
+  -H "Content-Type: application/json" \
+  -d '{
+    "security_key": "your-secret-key",
+    "input": "The quick brown fox jumps over the lazy dog",
+    "model": "text-embedding-3-small",
+    "dimensions": 512
+  }'
+```
+
+#### Response
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "object": "embedding",
+      "index": 0,
+      "embedding": [0.0023064255, -0.009327292, ...]
+    }
+  ],
+  "model": "text-embedding-3-small",
+  "usage": {
+    "prompt_tokens": 9,
+    "total_tokens": 9
+  }
+}
+```
+
+---
+
+## Error Responses
+
+| Status | Description |
+|--------|-------------|
+| `400` | Bad Request — Invalid input or streaming not supported |
+| `403` | Forbidden — Invalid or missing `security_key` |
+| `404` | Not Found — Unknown endpoint |
+| `429` | Too Many Requests — Rate limit exceeded (health/log endpoints) |
+| `500` | Internal Server Error — OpenAI API error or server issue |
+
+---
+
+## Docker
+
+Build and push Docker image:
+
+```bash
+npm run docker
+```
+
+Or manually:
+
+```bash
+docker build -t chatgpt-proxy .
+docker run -p 3002:3002 --env-file .env chatgpt-proxy
+```
+
+---
+
+## Server Configuration
+
+- **Port:** 3002
+- **Request Timeout:** 15 minutes (900,000 ms)
+- **Keep-Alive Timeout:** 15 minutes
+- **Headers Timeout:** ~16 minutes
+
+---
+
+## License
+
+ISC
