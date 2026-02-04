@@ -4,6 +4,7 @@ A lightweight HTTP proxy server for OpenAI APIs. It wraps the official OpenAI SD
 
 ## Features
 
+- **Responses API** — OpenAI's most advanced interface with tools, web search, file search, MCP, function calling, and streaming
 - **Chat Completions** — Full OpenAI Chat Completions API support including vision (images)
 - **Audio Transcriptions** — Whisper-based speech-to-text
 - **Embeddings** — Generate text embeddings
@@ -156,6 +157,493 @@ Standard OpenAI Chat Completion response:
     "completion_tokens": 100,
     "total_tokens": 125
   }
+}
+```
+
+---
+
+### `POST /openai2`
+
+**OpenAI Responses API endpoint** — The most advanced interface for generating model responses with support for tools, files, web searching, MCP, function calling, and more.
+
+Proxies requests to `POST https://api.openai.com/v1/responses`.
+
+#### Request Body (JSON)
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `security_key` | string | ✅ | Must match `SECURITY_KEY` env variable |
+| `openai_api_key` | string | ❌ | Override the default API key |
+| `project` | string | ❌ | OpenAI project ID |
+| `organization` | string | ❌ | OpenAI organization ID |
+| `model` | string | ✅ | Model ID (e.g., `gpt-4o`, `gpt-4.1`, `o3`) |
+| `input` | string/array | ✅ | Text, image, or file inputs to the model |
+| `instructions` | string | ❌ | System/developer message inserted into context |
+| `tools` | array | ❌ | Array of tools (web_search, file_search, function, mcp, etc.) |
+| `tool_choice` | string/object | ❌ | How model should select tools (`auto`, `none`, `required`, or specific tool) |
+| `stream` | boolean | ❌ | Enable Server-Sent Events streaming (default: `false`) |
+| `temperature` | number | ❌ | Sampling temperature (0-2, default: 1) |
+| `top_p` | number | ❌ | Nucleus sampling (0-1, default: 1) |
+| `max_output_tokens` | integer | ❌ | Max tokens for response including reasoning |
+| `max_tool_calls` | integer | ❌ | Max total calls to built-in tools |
+| `parallel_tool_calls` | boolean | ❌ | Allow parallel tool calls (default: `true`) |
+| `previous_response_id` | string | ❌ | ID of previous response for multi-turn conversations |
+| `conversation` | string/object | ❌ | Conversation context (cannot use with `previous_response_id`) |
+| `store` | boolean | ❌ | Store response for later retrieval (default: `true`) |
+| `metadata` | object | ❌ | Up to 16 key-value pairs for additional info |
+| `include` | array | ❌ | Additional output data to include (see below) |
+| `text` | object | ❌ | Text response configuration (format, structured output) |
+| `reasoning` | object | ❌ | Reasoning model configuration (effort, summary) |
+| `truncation` | string | ❌ | Truncation strategy (`auto` or `disabled`) |
+| `background` | boolean | ❌ | Run response in background (default: `false`) |
+| `service_tier` | string | ❌ | Processing tier (`auto`, `default`, `flex`, `priority`) |
+
+#### Include Options
+
+Specify additional output data to include:
+- `web_search_call.action.sources` — Include web search sources
+- `code_interpreter_call.outputs` — Include code interpreter outputs
+- `file_search_call.results` — Include file search results
+- `message.input_image.image_url` — Include input image URLs
+- `message.output_text.logprobs` — Include logprobs with messages
+- `reasoning.encrypted_content` — Include encrypted reasoning tokens
+
+#### Tools Configuration
+
+**Web Search Tool:**
+```json
+{
+  "type": "web_search_preview",
+  "search_context_size": "medium"
+}
+```
+
+**File Search Tool:**
+```json
+{
+  "type": "file_search",
+  "vector_store_ids": ["vs_abc123"],
+  "max_num_results": 20
+}
+```
+
+**Function Calling Tool:**
+```json
+{
+  "type": "function",
+  "name": "get_weather",
+  "description": "Get current weather for a location",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "location": { "type": "string", "description": "City name" }
+    },
+    "required": ["location"]
+  }
+}
+```
+
+**MCP (Model Context Protocol) Tool:**
+```json
+{
+  "type": "mcp",
+  "server_label": "my-mcp-server",
+  "server_url": "https://my-mcp-server.example.com",
+  "allowed_tools": ["tool1", "tool2"]
+}
+```
+
+**Code Interpreter Tool:**
+```json
+{
+  "type": "code_interpreter",
+  "container": { "type": "auto" }
+}
+```
+
+#### Example: Simple Text Request
+
+```bash
+curl -X POST http://localhost:3002/openai2 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "security_key": "your-secret-key",
+    "model": "gpt-4o",
+    "input": "Tell me a three sentence bedtime story about a unicorn."
+  }'
+```
+
+#### Example: With System Instructions
+
+```bash
+curl -X POST http://localhost:3002/openai2 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "security_key": "your-secret-key",
+    "model": "gpt-4o",
+    "instructions": "You are a helpful coding assistant. Always provide code examples.",
+    "input": "How do I read a file in Python?"
+  }'
+```
+
+#### Example: Web Search
+
+```bash
+curl -X POST http://localhost:3002/openai2 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "security_key": "your-secret-key",
+    "model": "gpt-4o",
+    "input": "What are the latest news about AI?",
+    "tools": [
+      { "type": "web_search_preview" }
+    ],
+    "include": ["web_search_call.action.sources"]
+  }'
+```
+
+#### Example: File Search with Vector Store
+
+```bash
+curl -X POST http://localhost:3002/openai2 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "security_key": "your-secret-key",
+    "model": "gpt-4o",
+    "input": "What does the documentation say about authentication?",
+    "tools": [
+      {
+        "type": "file_search",
+        "vector_store_ids": ["vs_abc123"],
+        "max_num_results": 10
+      }
+    ],
+    "include": ["file_search_call.results"]
+  }'
+```
+
+#### Example: Function Calling
+
+```bash
+curl -X POST http://localhost:3002/openai2 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "security_key": "your-secret-key",
+    "model": "gpt-4o",
+    "input": "What is the weather in San Francisco?",
+    "tools": [
+      {
+        "type": "function",
+        "name": "get_weather",
+        "description": "Get current weather for a location",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "location": { "type": "string", "description": "City name" },
+            "unit": { "type": "string", "enum": ["celsius", "fahrenheit"] }
+          },
+          "required": ["location"]
+        }
+      }
+    ]
+  }'
+```
+
+#### Example: MCP Server Integration
+
+```bash
+curl -X POST http://localhost:3002/openai2 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "security_key": "your-secret-key",
+    "model": "gpt-4o",
+    "input": "Search my Google Drive for Q4 reports",
+    "tools": [
+      {
+        "type": "mcp",
+        "server_label": "google-drive",
+        "server_url": "https://mcp.example.com/google-drive",
+        "allowed_tools": ["search_files", "read_file"]
+      }
+    ]
+  }'
+```
+
+#### Example: Image Input
+
+```bash
+curl -X POST http://localhost:3002/openai2 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "security_key": "your-secret-key",
+    "model": "gpt-4o",
+    "input": [
+      { "type": "input_text", "text": "What is in this image?" },
+      { "type": "input_image", "image_url": "https://example.com/image.png" }
+    ]
+  }'
+```
+
+#### Example: Multi-turn Conversation
+
+```bash
+# First request
+curl -X POST http://localhost:3002/openai2 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "security_key": "your-secret-key",
+    "model": "gpt-4o",
+    "input": "My name is Alice."
+  }'
+
+# Response includes "id": "resp_abc123..."
+
+# Second request with previous_response_id
+curl -X POST http://localhost:3002/openai2 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "security_key": "your-secret-key",
+    "model": "gpt-4o",
+    "input": "What is my name?",
+    "previous_response_id": "resp_abc123..."
+  }'
+```
+
+#### Example: Streaming Response
+
+```bash
+curl -X POST http://localhost:3002/openai2 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "security_key": "your-secret-key",
+    "model": "gpt-4o",
+    "input": "Write a short poem about coding.",
+    "stream": true
+  }'
+```
+
+#### Example: Structured Output (JSON Schema)
+
+```bash
+curl -X POST http://localhost:3002/openai2 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "security_key": "your-secret-key",
+    "model": "gpt-4o",
+    "input": "Extract the name and age from: John is 30 years old.",
+    "text": {
+      "format": {
+        "type": "json_schema",
+        "name": "person_info",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" },
+            "age": { "type": "integer" }
+          },
+          "required": ["name", "age"]
+        }
+      }
+    }
+  }'
+```
+
+#### Example: Reasoning Model Configuration
+
+```bash
+curl -X POST http://localhost:3002/openai2 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "security_key": "your-secret-key",
+    "model": "o3",
+    "input": "Solve this complex math problem: ...",
+    "reasoning": {
+      "effort": "high",
+      "summary": "auto"
+    }
+  }'
+```
+
+#### Example: Combined Tools (Web Search + Function Calling)
+
+```bash
+curl -X POST http://localhost:3002/openai2 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "security_key": "your-secret-key",
+    "model": "gpt-4o",
+    "input": "Find the current stock price of Apple and calculate a 10% increase",
+    "tools": [
+      { "type": "web_search_preview" },
+      {
+        "type": "function",
+        "name": "calculate_percentage",
+        "description": "Calculate percentage of a number",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "number": { "type": "number" },
+            "percentage": { "type": "number" }
+          },
+          "required": ["number", "percentage"]
+        }
+      }
+    ],
+    "parallel_tool_calls": true
+  }'
+```
+
+#### Response
+
+Standard OpenAI Responses API response:
+
+```json
+{
+  "id": "resp_67ccd2bed1ec8190b14f964abc054267...",
+  "object": "response",
+  "created_at": 1741476542,
+  "status": "completed",
+  "completed_at": 1741476543,
+  "model": "gpt-4o-2024-08-06",
+  "output": [
+    {
+      "type": "message",
+      "id": "msg_67ccd2bf17f0819081ff3bb2cf6508e6...",
+      "status": "completed",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "In a peaceful grove beneath a silver moon...",
+          "annotations": []
+        }
+      ]
+    }
+  ],
+  "parallel_tool_calls": true,
+  "reasoning": { "effort": null, "summary": null },
+  "store": true,
+  "temperature": 1.0,
+  "tool_choice": "auto",
+  "tools": [],
+  "usage": {
+    "input_tokens": 36,
+    "input_tokens_details": { "cached_tokens": 0 },
+    "output_tokens": 87,
+    "output_tokens_details": { "reasoning_tokens": 0 },
+    "total_tokens": 123
+  }
+}
+```
+
+---
+
+### `GET /openai2/:response_id`
+
+**Retrieve a stored response by ID.**
+
+#### Query Parameters
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `security_key` | string | ✅ | Must match `SECURITY_KEY` env variable |
+| `openai_api_key` | string | ❌ | Override the default API key |
+| `project` | string | ❌ | OpenAI project ID |
+| `organization` | string | ❌ | OpenAI organization ID |
+
+#### Example Request
+
+```bash
+curl "http://localhost:3002/openai2/resp_abc123?security_key=your-secret-key"
+```
+
+---
+
+### `DELETE /openai2/:response_id`
+
+**Delete a stored response.**
+
+#### Query Parameters
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `security_key` | string | ✅ | Must match `SECURITY_KEY` env variable |
+| `openai_api_key` | string | ❌ | Override the default API key |
+
+#### Example Request
+
+```bash
+curl -X DELETE "http://localhost:3002/openai2/resp_abc123?security_key=your-secret-key"
+```
+
+#### Response
+
+```json
+{
+  "id": "resp_abc123",
+  "object": "response",
+  "deleted": true
+}
+```
+
+---
+
+### `POST /openai2/:response_id/cancel`
+
+**Cancel a background response** (only for responses created with `background: true`).
+
+#### Request Body (JSON)
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `security_key` | string | ✅ | Must match `SECURITY_KEY` env variable |
+| `openai_api_key` | string | ❌ | Override the default API key |
+
+#### Example Request
+
+```bash
+curl -X POST http://localhost:3002/openai2/resp_abc123/cancel \
+  -H "Content-Type: application/json" \
+  -d '{ "security_key": "your-secret-key" }'
+```
+
+---
+
+### `GET /openai2/:response_id/input_items`
+
+**List input items for a response.**
+
+#### Query Parameters
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `security_key` | string | ✅ | Must match `SECURITY_KEY` env variable |
+| `openai_api_key` | string | ❌ | Override the default API key |
+
+#### Example Request
+
+```bash
+curl "http://localhost:3002/openai2/resp_abc123/input_items?security_key=your-secret-key"
+```
+
+#### Response
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "msg_abc123",
+      "type": "message",
+      "role": "user",
+      "content": [
+        { "type": "input_text", "text": "Tell me a story." }
+      ]
+    }
+  ],
+  "first_id": "msg_abc123",
+  "last_id": "msg_abc123",
+  "has_more": false
 }
 ```
 
