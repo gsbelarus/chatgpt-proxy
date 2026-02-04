@@ -88,7 +88,7 @@ function checkAccess(req) {
 export const server = http.createServer(async (req, res) => {
     // Set CORS headers
     res.setHeader("Access-Control-Allow-Origin", "*"); // Allow all origins
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS"); // Allow specific methods
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS"); // Allow specific methods
     res.setHeader("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept"); // Allow specific headers
     if (req.method === "OPTIONS") {
         res.writeHead(200);
@@ -465,6 +465,280 @@ export const server = http.createServer(async (req, res) => {
                 return;
             const errorMessage = err instanceof Error ? err.message : String(err);
             logError(`Audio transcription failed: ${errorMessage}`);
+            res.writeHead(500, { "Content-Type": "text/plain" });
+            res.end("Internal Server Error");
+        }
+    }
+    else if (req.url === "/openai2" && req.method === "POST") {
+        // OpenAI Responses API endpoint
+        // https://platform.openai.com/docs/api-reference/responses
+        const started = Date.now();
+        let createResponseText = "";
+        try {
+            const body = await getBody(req);
+            const data = JSON.parse(body);
+            const { security_key, openai_api_key, project, organization, timeout, stream, ...responsesPayload } = data;
+            if (security_key !== process.env.SECURITY_KEY) {
+                res.writeHead(403, { "Content-Type": "text/plain" });
+                res.end("Forbidden");
+                return;
+            }
+            const openai = new OpenAI({
+                apiKey: openai_api_key || process.env.OPENAI_API_KEY,
+                project: project || (process.env.OPENAI_PROJECT_KEY ?? null),
+                organization: organization ?? null,
+            });
+            currentParallelRequests++;
+            if (currentParallelRequests > maxParallelRequests) {
+                maxParallelRequests = currentParallelRequests;
+            }
+            try {
+                createResponseText = JSON.stringify(responsesPayload, null, 2);
+                if (stream) {
+                    // Streaming response using Server-Sent Events
+                    res.writeHead(200, {
+                        "Content-Type": "text/event-stream",
+                        "Cache-Control": "no-cache",
+                        Connection: "keep-alive",
+                    });
+                    const streamResponse = openai.responses.stream({
+                        ...responsesPayload,
+                    });
+                    streamResponse.on("event", (event) => {
+                        res.write(`data: ${JSON.stringify(event)}\n\n`);
+                    });
+                    await streamResponse.finalResponse();
+                    res.write("data: [DONE]\n\n");
+                    res.end();
+                    const requestTime = (Date.now() - started) / 1000;
+                    requestCount++;
+                    totalRequestTime += requestTime;
+                    if (requestTime > maxRequestTime) {
+                        maxRequestTime = requestTime;
+                    }
+                    logInfo(`
+<strong>Responses API Streaming Request #${requestCount}:</strong> ${createResponseText}
+
+<strong>Request successful in ${requestTime.toFixed(1)}s...</strong>
+`);
+                }
+                else {
+                    // Non-streaming response
+                    const response = await openai.responses.create(responsesPayload);
+                    const responseText = JSON.stringify(response, null, 2);
+                    res.writeHead(200, { "Content-Type": "application/json" });
+                    res.end(responseText);
+                    requestCount++;
+                    const requestTime = (Date.now() - started) / 1000;
+                    totalRequestTime += requestTime;
+                    if (requestTime > maxRequestTime) {
+                        maxRequestTime = requestTime;
+                    }
+                    const promptTokenCount = response.usage?.input_tokens ?? 0;
+                    const cachedTokenCount = response.usage?.input_tokens_details?.cached_tokens ?? 0;
+                    const completionTokenCount = response.usage?.output_tokens ?? 0;
+                    if (promptTokenCount > maxPromptTokens) {
+                        maxPromptTokens = promptTokenCount;
+                    }
+                    if (cachedTokenCount > maxCachedTokens) {
+                        maxCachedTokens = cachedTokenCount;
+                    }
+                    if (completionTokenCount > maxCompletionTokens) {
+                        maxCompletionTokens = completionTokenCount;
+                    }
+                    logInfo(`
+<strong>Responses API Request #${requestCount}:</strong> ${createResponseText}
+
+<strong>Response:</strong> ${responseText}
+
+<strong>Request successful in ${requestTime.toFixed(1)}s...</strong> Input tokens: ${promptTokenCount}, Cached tokens: ${cachedTokenCount}, Output tokens: ${completionTokenCount}
+`);
+                }
+            }
+            finally {
+                currentParallelRequests--;
+            }
+        }
+        catch (err) {
+            currentParallelRequests--;
+            if (handleOpenAIError(res, err))
+                return;
+            const errorMessage = err instanceof Error ? err.message : String(err);
+            const requestTime = (Date.now() - started) / 1000;
+            logError(`
+Responses API request failed: ${errorMessage}
+
+<strong>Request:</strong> ${createResponseText}
+
+<strong>Request done in ${requestTime.toFixed(1)}s...</strong>
+`);
+            errorCount++;
+            res.writeHead(500, { "Content-Type": "text/plain" });
+            res.end("Internal Server Error");
+        }
+    }
+    else if (req.url?.startsWith("/openai2/") && req.method === "GET") {
+        // GET /openai2/:response_id - Retrieve a response by ID
+        try {
+            const body = await getBody(req);
+            let security_key = "";
+            let openai_api_key = "";
+            let project = "";
+            let organization = "";
+            // Parse query parameters for auth
+            const urlObj = new URL(req.url, `http://${req.headers.host}`);
+            security_key = urlObj.searchParams.get("security_key") || "";
+            openai_api_key = urlObj.searchParams.get("openai_api_key") || "";
+            project = urlObj.searchParams.get("project") || "";
+            organization = urlObj.searchParams.get("organization") || "";
+            if (security_key !== process.env.SECURITY_KEY) {
+                res.writeHead(403, { "Content-Type": "text/plain" });
+                res.end("Forbidden");
+                return;
+            }
+            const responseId = req.url.split("/openai2/")[1]?.split("?")[0];
+            if (!responseId) {
+                res.writeHead(400, { "Content-Type": "text/plain" });
+                res.end("Missing response_id");
+                return;
+            }
+            const openai = new OpenAI({
+                apiKey: openai_api_key || process.env.OPENAI_API_KEY,
+                project: project || (process.env.OPENAI_PROJECT_KEY ?? null),
+                organization: organization ?? null,
+            });
+            const response = await openai.responses.retrieve(responseId);
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(response, null, 2));
+        }
+        catch (err) {
+            if (handleOpenAIError(res, err))
+                return;
+            const errorMessage = err instanceof Error ? err.message : String(err);
+            logError(`Responses API retrieve failed: ${errorMessage}`);
+            res.writeHead(500, { "Content-Type": "text/plain" });
+            res.end("Internal Server Error");
+        }
+    }
+    else if (req.url?.startsWith("/openai2/") &&
+        req.url?.endsWith("/cancel") &&
+        req.method === "POST") {
+        // POST /openai2/:response_id/cancel - Cancel a background response
+        try {
+            const body = await getBody(req);
+            const data = body ? JSON.parse(body) : {};
+            const { security_key, openai_api_key, project, organization } = data;
+            if (security_key !== process.env.SECURITY_KEY) {
+                res.writeHead(403, { "Content-Type": "text/plain" });
+                res.end("Forbidden");
+                return;
+            }
+            const responseId = req.url
+                .split("/openai2/")[1]
+                ?.replace("/cancel", "")
+                ?.split("?")[0];
+            if (!responseId) {
+                res.writeHead(400, { "Content-Type": "text/plain" });
+                res.end("Missing response_id");
+                return;
+            }
+            const openai = new OpenAI({
+                apiKey: openai_api_key || process.env.OPENAI_API_KEY,
+                project: project || (process.env.OPENAI_PROJECT_KEY ?? null),
+                organization: organization ?? null,
+            });
+            const response = await openai.responses.cancel(responseId);
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(response, null, 2));
+            logInfo(`Responses API cancel successful for: ${responseId}`);
+        }
+        catch (err) {
+            if (handleOpenAIError(res, err))
+                return;
+            const errorMessage = err instanceof Error ? err.message : String(err);
+            logError(`Responses API cancel failed: ${errorMessage}`);
+            res.writeHead(500, { "Content-Type": "text/plain" });
+            res.end("Internal Server Error");
+        }
+    }
+    else if (req.url?.startsWith("/openai2/") && req.method === "DELETE") {
+        // DELETE /openai2/:response_id - Delete a response
+        try {
+            // Parse query parameters for auth
+            const urlObj = new URL(req.url, `http://${req.headers.host}`);
+            const security_key = urlObj.searchParams.get("security_key") || "";
+            const openai_api_key = urlObj.searchParams.get("openai_api_key") || "";
+            const project = urlObj.searchParams.get("project") || "";
+            const organization = urlObj.searchParams.get("organization") || "";
+            if (security_key !== process.env.SECURITY_KEY) {
+                res.writeHead(403, { "Content-Type": "text/plain" });
+                res.end("Forbidden");
+                return;
+            }
+            const responseId = req.url.split("/openai2/")[1]?.split("?")[0];
+            if (!responseId) {
+                res.writeHead(400, { "Content-Type": "text/plain" });
+                res.end("Missing response_id");
+                return;
+            }
+            const openai = new OpenAI({
+                apiKey: openai_api_key || process.env.OPENAI_API_KEY,
+                project: project || (process.env.OPENAI_PROJECT_KEY ?? null),
+                organization: organization ?? null,
+            });
+            // Use the beta API for delete
+            const response = await openai.responses.delete(responseId);
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(response, null, 2));
+            logInfo(`Responses API delete successful for: ${responseId}`);
+        }
+        catch (err) {
+            if (handleOpenAIError(res, err))
+                return;
+            const errorMessage = err instanceof Error ? err.message : String(err);
+            logError(`Responses API delete failed: ${errorMessage}`);
+            res.writeHead(500, { "Content-Type": "text/plain" });
+            res.end("Internal Server Error");
+        }
+    }
+    else if (req.url?.startsWith("/openai2/") &&
+        req.url?.endsWith("/input_items") &&
+        req.method === "GET") {
+        // GET /openai2/:response_id/input_items - List input items for a response
+        try {
+            const urlObj = new URL(req.url, `http://${req.headers.host}`);
+            const security_key = urlObj.searchParams.get("security_key") || "";
+            const openai_api_key = urlObj.searchParams.get("openai_api_key") || "";
+            const project = urlObj.searchParams.get("project") || "";
+            const organization = urlObj.searchParams.get("organization") || "";
+            if (security_key !== process.env.SECURITY_KEY) {
+                res.writeHead(403, { "Content-Type": "text/plain" });
+                res.end("Forbidden");
+                return;
+            }
+            const responseId = req.url
+                .split("/openai2/")[1]
+                ?.replace("/input_items", "")
+                ?.split("?")[0];
+            if (!responseId) {
+                res.writeHead(400, { "Content-Type": "text/plain" });
+                res.end("Missing response_id");
+                return;
+            }
+            const openai = new OpenAI({
+                apiKey: openai_api_key || process.env.OPENAI_API_KEY,
+                project: project || (process.env.OPENAI_PROJECT_KEY ?? null),
+                organization: organization ?? null,
+            });
+            const inputItems = await openai.responses.inputItems.list(responseId);
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(inputItems, null, 2));
+        }
+        catch (err) {
+            if (handleOpenAIError(res, err))
+                return;
+            const errorMessage = err instanceof Error ? err.message : String(err);
+            logError(`Responses API input_items failed: ${errorMessage}`);
             res.writeHead(500, { "Content-Type": "text/plain" });
             res.end("Internal Server Error");
         }
