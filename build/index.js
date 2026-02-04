@@ -3,6 +3,7 @@ import { config } from "dotenv";
 import OpenAI, { toFile } from "openai";
 import Busboy from "busboy";
 config({ path: [".env.local", ".env"] });
+const defaultModel = "gpt-5-nano";
 const infos = [];
 const errors = [];
 const maxLogLength = 50;
@@ -29,6 +30,22 @@ function logInfo(message) {
     }
 }
 const { ChatGPTAPI } = await import("chatgpt");
+function handleOpenAIError(res, err) {
+    if (err instanceof OpenAI.APIError) {
+        const status = err.status ?? 500;
+        const errorPayload = err.error ?? {
+            message: err.message,
+            type: "api_error",
+            param: null,
+            code: null,
+        };
+        logError(`OpenAI request failed: ${errorPayload.message ?? err.message}`);
+        res.writeHead(status, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: errorPayload }, null, 2));
+        return true;
+    }
+    return false;
+}
 function getBody(request) {
     return new Promise((resolve, reject) => {
         const bodyParts = [];
@@ -65,7 +82,8 @@ function isChatGPTRequest(object) {
 function checkAccess(req) {
     const urlObj = new URL(req.url, `http://${req.headers.host}`);
     const searchParams = urlObj.searchParams;
-    return searchParams.get("access_token") === "123";
+    const accessToken = process.env.ACCESS_TOKEN;
+    return (Boolean(accessToken) && searchParams.get("access_token") === accessToken);
 }
 export const server = http.createServer(async (req, res) => {
     // Set CORS headers
@@ -94,7 +112,7 @@ export const server = http.createServer(async (req, res) => {
                 apiKey: process.env.OPENAI_API_KEY,
                 apiBaseUrl: "https://api.openai.com/v1",
                 completionParams: {
-                    model: "gpt-4o-mini",
+                    model: defaultModel,
                     temperature: 1,
                 },
             });
@@ -105,6 +123,8 @@ export const server = http.createServer(async (req, res) => {
             res.end(JSON.stringify(gptResponse, null, 2));
         }
         catch (err) {
+            if (handleOpenAIError(res, err))
+                return;
             const errorMessage = err instanceof Error ? err.message : String(err);
             logError(`ChatGPT request failed: ${errorMessage}`);
             res.writeHead(500, { "Content-Type": "text/plain" });
@@ -123,7 +143,7 @@ export const server = http.createServer(async (req, res) => {
                 apiKey: process.env.OPENAI_API_KEY,
             });
             const chatCompletion = await openai.chat.completions.create({
-                model: "gpt-4o-mini",
+                model: defaultModel,
                 messages: [
                     {
                         role: "system",
@@ -290,15 +310,17 @@ export const server = http.createServer(async (req, res) => {
 `);
         }
         catch (err) {
+            if (handleOpenAIError(res, err))
+                return;
             const errorMessage = err instanceof Error ? err.message : String(err);
             const requestTime = (Date.now() - started) / 1000;
             logError(`
-ChatGPT request failed: ${errorMessage}
+    ChatGPT request failed: ${errorMessage}
 
-<strong>Request #${requestCount}:</strong> ${createChatCompletionText}
+    <strong>Request #${requestCount}:</strong> ${createChatCompletionText}
 
-<strong>Request done in ${requestTime.toFixed(1)}s...</strong>
-`);
+    <strong>Request done in ${requestTime.toFixed(1)}s...</strong>
+    `);
             errorCount++;
             res.writeHead(500, { "Content-Type": "text/plain" });
             res.end("Internal Server Error");
@@ -319,7 +341,7 @@ ChatGPT request failed: ${errorMessage}
                 res.end("Forbidden");
                 return;
             }
-            const useModel = model ?? "gpt-4o-mini";
+            const useModel = model ?? defaultModel;
             const started = Date.now();
             logInfo(`model: ${useModel}, temperature: ${temperature}, prompt: ${prompt}`);
             const chatAPI = new ChatGPTAPI({
@@ -439,6 +461,8 @@ ChatGPT request failed: ${errorMessage}
             res.end(JSON.stringify(transcription, null, 2));
         }
         catch (err) {
+            if (handleOpenAIError(res, err))
+                return;
             const errorMessage = err instanceof Error ? err.message : String(err);
             logError(`Audio transcription failed: ${errorMessage}`);
             res.writeHead(500, { "Content-Type": "text/plain" });
@@ -474,6 +498,8 @@ ChatGPT request failed: ${errorMessage}
             res.end(embeddingsResponseText);
         }
         catch (err) {
+            if (handleOpenAIError(res, err))
+                return;
             const errorMessage = err instanceof Error ? err.message : String(err);
             logError(`Embeddings request failed: ${errorMessage}`);
             res.writeHead(500, { "Content-Type": "text/plain" });

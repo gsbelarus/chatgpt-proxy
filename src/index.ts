@@ -45,6 +45,25 @@ function logInfo(message: string) {
 
 const { ChatGPTAPI } = await import("chatgpt");
 
+function handleOpenAIError(res: http.ServerResponse, err: unknown) {
+  if (err instanceof OpenAI.APIError) {
+    const status = err.status ?? 500;
+    const errorPayload = err.error ?? {
+      message: err.message,
+      type: "api_error",
+      param: null,
+      code: null,
+    };
+
+    logError(`OpenAI request failed: ${errorPayload.message ?? err.message}`);
+    res.writeHead(status, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: errorPayload }, null, 2));
+    return true;
+  }
+
+  return false;
+}
+
 function getBody(request: http.IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     const bodyParts: any[] = [];
@@ -95,8 +114,11 @@ function isChatGPTRequest(object: any): object is ChatGPTRequest {
 function checkAccess(req: http.IncomingMessage): boolean {
   const urlObj = new URL(req.url!, `http://${req.headers.host}`);
   const searchParams = urlObj.searchParams;
+  const accessToken = process.env.ACCESS_TOKEN;
 
-  return searchParams.get("access_token") === "123";
+  return (
+    Boolean(accessToken) && searchParams.get("access_token") === accessToken
+  );
 }
 
 export const server = http.createServer(async (req, res) => {
@@ -145,6 +167,7 @@ export const server = http.createServer(async (req, res) => {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(gptResponse, null, 2));
     } catch (err: unknown) {
+      if (handleOpenAIError(res, err)) return;
       const errorMessage = err instanceof Error ? err.message : String(err);
       logError(`ChatGPT request failed: ${errorMessage}`);
       res.writeHead(500, { "Content-Type": "text/plain" });
@@ -187,10 +210,6 @@ export const server = http.createServer(async (req, res) => {
       res.end("Internal Server Error");
     }
   } else if (req.url?.startsWith("/log")) {
-    res.writeHead(403, { "Content-Type": "text/plain" });
-    res.end("Forbidden");
-    return;
-
     if (!checkAccess(req)) {
       res.writeHead(403, { "Content-Type": "text/plain" });
       res.end("Forbidden");
@@ -296,9 +315,9 @@ export const server = http.createServer(async (req, res) => {
             ? { type: "image_url", image_url: { url: image.url } }
             : image.base64
               ? {
-                type: "image_url",
-                image_url: { url: `data:image/png;base64,${image.base64}` },
-              }
+                  type: "image_url",
+                  image_url: { url: `data:image/png;base64,${image.base64}` },
+                }
               : null;
 
           if (!imagePart) {
@@ -381,16 +400,17 @@ export const server = http.createServer(async (req, res) => {
 <strong>Request successful in ${requestTime.toFixed(1)}s...</strong> Prompt tokens: ${promptTokenCount}, Cached tokens: ${cachedTokenCount}, Completion tokens: ${completionTokenCount}
 `);
     } catch (err: unknown) {
+      if (handleOpenAIError(res, err)) return;
       const errorMessage = err instanceof Error ? err.message : String(err);
       const requestTime = (Date.now() - started) / 1000;
 
       logError(`
-ChatGPT request failed: ${errorMessage}
+    ChatGPT request failed: ${errorMessage}
 
-<strong>Request #${requestCount}:</strong> ${createChatCompletionText}
+    <strong>Request #${requestCount}:</strong> ${createChatCompletionText}
 
-<strong>Request done in ${requestTime.toFixed(1)}s...</strong>
-`);
+    <strong>Request done in ${requestTime.toFixed(1)}s...</strong>
+    `);
 
       errorCount++;
       res.writeHead(500, { "Content-Type": "text/plain" });
@@ -562,6 +582,7 @@ ChatGPT request failed: ${errorMessage}
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(transcription, null, 2));
     } catch (err: unknown) {
+      if (handleOpenAIError(res, err)) return;
       const errorMessage = err instanceof Error ? err.message : String(err);
       logError(`Audio transcription failed: ${errorMessage}`);
       res.writeHead(500, { "Content-Type": "text/plain" });
@@ -613,6 +634,7 @@ ChatGPT request failed: ${errorMessage}
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(embeddingsResponseText);
     } catch (err: unknown) {
+      if (handleOpenAIError(res, err)) return;
       const errorMessage = err instanceof Error ? err.message : String(err);
       logError(`Embeddings request failed: ${errorMessage}`);
       res.writeHead(500, { "Content-Type": "text/plain" });
