@@ -206,6 +206,17 @@ The proxy also exposes the other documented Responses API operations:
 | `truncation` | string | ❌ | Truncation strategy (`auto` or `disabled`) |
 | `background` | boolean | ❌ | Run response in background (default: `false`) |
 | `service_tier` | string | ❌ | Processing tier (`auto`, `default`, `flex`, `priority`) |
+| `timeout` | number | ❌ | Proxy-specific OpenAI SDK request timeout in milliseconds for this single upstream call |
+
+#### Timeout Override Semantics
+
+- `timeout` is expressed in **milliseconds**.
+- For `POST` Responses endpoints, pass `timeout` as a JSON number, not a string.
+- For `GET`/`DELETE` Responses endpoints, pass `timeout` as a query parameter; numeric strings are parsed.
+- The proxy applies this value to the **single upstream OpenAI SDK request** for that operation. It is not a global session timeout and does not carry over to later retrieve, list, cancel, or delete calls.
+- Invalid, non-finite, or non-positive values are ignored and the SDK default is used instead.
+- Practical upper bound: **900000 ms** (15 minutes). The proxy's own HTTP request timeout is 15 minutes, so larger values do not extend the client-visible request beyond that limit.
+- This override is currently supported on the `/openai2` Responses routes listed below. Other proxy routes do not currently honor a `timeout` override.
 
 #### Include Options
 
@@ -439,7 +450,7 @@ curl -X POST http://localhost:3002/openai2 \
 - `stream`
 - `include_obfuscation`
 - `starting_after`
-- `timeout` (proxy-specific SDK timeout override)
+- `timeout` (milliseconds, per upstream retrieve request, practical max `900000`)
 
 #### Input Items Query Parameters
 
@@ -449,7 +460,7 @@ curl -X POST http://localhost:3002/openai2 \
 - `include`
 - `limit`
 - `order`
-- `timeout` (proxy-specific SDK timeout override)
+- `timeout` (milliseconds, per upstream list request, practical max `900000`)
 
 #### Example: Compact a Conversation
 
@@ -864,6 +875,8 @@ docker run -p 3002:3002 --env-file .env chatgpt-proxy
 - **Request Timeout:** 15 minutes (900,000 ms)
 - **Keep-Alive Timeout:** 15 minutes
 - **Headers Timeout:** ~16 minutes
+
+Client timeout overrides cannot increase these server-side HTTP limits.
 
 ---
 

@@ -30,15 +30,53 @@ let maxCompletionTokens = 0;
 let errorCount = 0;
 let lastLogTime = 0;
 
+function maskApiKey(value: string): string {
+  const trimmed = value.trim();
+  const visibleSuffix = trimmed.slice(-4);
+
+  return `...${visibleSuffix}`;
+}
+
+function sanitizeLogMessage(message: string): string {
+  const replaceValue = (value: string) => maskApiKey(value);
+
+  return message
+    .replace(
+      /([?&](?:openai_api_key|api_key|apiKey|access_token)=)([^&\s"']+)/gi,
+      (_, prefix: string, value: string) => `${prefix}${replaceValue(value)}`,
+    )
+    .replace(
+      /(["'](?:openai_api_key|api_key|apiKey|access_token)["']\s*:\s*["'])([^"']+)(["'])/gi,
+      (_, prefix: string, value: string, suffix: string) =>
+        `${prefix}${replaceValue(value)}${suffix}`,
+    )
+    .replace(
+      /((?:Bearer|bearer)\s+)(sk-[A-Za-z0-9_-]+)/g,
+      (_, prefix: string, value: string) => `${prefix}${replaceValue(value)}`,
+    )
+    .replace(
+      /\b(sk-[A-Za-z0-9_-]{8,})\b/g,
+      (value: string) => replaceValue(value),
+    );
+}
+
 function logError(message: string) {
-  errors.push({ type: "ERROR", message, timestamp: new Date() });
+  errors.push({
+    type: "ERROR",
+    message: sanitizeLogMessage(message),
+    timestamp: new Date(),
+  });
   if (errors.length > maxLogLength) {
     errors.splice(0, errors.length - maxLogLength);
   }
 }
 
 function logInfo(message: string) {
-  infos.push({ type: "INFO", message, timestamp: new Date() });
+  infos.push({
+    type: "INFO",
+    message: sanitizeLogMessage(message),
+    timestamp: new Date(),
+  });
   if (infos.length > maxLogLength) {
     infos.splice(0, infos.length - maxLogLength);
   }
@@ -414,9 +452,9 @@ export const server = http.createServer(async (req, res) => {
             ? { type: "image_url", image_url: { url: image.url } }
             : image.base64
               ? {
-                  type: "image_url",
-                  image_url: { url: `data:image/png;base64,${image.base64}` },
-                }
+                type: "image_url",
+                image_url: { url: `data:image/png;base64,${image.base64}` },
+              }
               : null;
 
           if (!imagePart) {
