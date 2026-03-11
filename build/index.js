@@ -79,8 +79,18 @@ function isChatGPTRequest(object) {
                 object.top_p >= 0 &&
                 object.top_p <= 1)));
 }
-function checkAccess(req) {
-    const urlObj = new URL(req.url, `http://${req.headers.host}`);
+function parseRequestUrl(req) {
+    if (typeof req.url !== "string") {
+        return null;
+    }
+    try {
+        return new URL(req.url, "http://localhost");
+    }
+    catch {
+        return null;
+    }
+}
+function checkAccess(urlObj) {
     const searchParams = urlObj.searchParams;
     const accessToken = process.env.ACCESS_TOKEN;
     return (Boolean(accessToken) && searchParams.get("access_token") === accessToken);
@@ -117,12 +127,36 @@ function parseNumber(value) {
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : undefined;
 }
+const responseIncludables = [
+    "file_search_call.results",
+    "web_search_call.results",
+    "web_search_call.action.sources",
+    "message.input_image.image_url",
+    "computer_call_output.output.image_url",
+    "code_interpreter_call.outputs",
+    "reasoning.encrypted_content",
+    "message.output_text.logprobs",
+];
 function parseResponseIncludes(searchParams) {
     const include = searchParams.getAll("include");
-    return include.length > 0 ? include : undefined;
+    if (include.length === 0) {
+        return { include: undefined };
+    }
+    const allowedIncludables = new Set(responseIncludables);
+    const invalid = include.filter((value) => !allowedIncludables.has(value));
+    if (invalid.length > 0) {
+        return { invalid };
+    }
+    return { include: include };
 }
 export const server = http.createServer(async (req, res) => {
-    const urlObj = new URL(req.url, `http://${req.headers.host ?? "localhost"}`);
+    const urlObj = parseRequestUrl(req);
+    if (!urlObj) {
+        logError("Rejected request with malformed URL");
+        res.writeHead(400, { "Content-Type": "text/plain" });
+        res.end("Bad Request");
+        return;
+    }
     const pathname = urlObj.pathname;
     // Set CORS headers
     res.setHeader("Access-Control-Allow-Origin", "*"); // Allow all origins
@@ -204,7 +238,7 @@ export const server = http.createServer(async (req, res) => {
         }
     }
     else if (pathname.startsWith("/log")) {
-        if (!checkAccess(req)) {
+        if (!checkAccess(urlObj)) {
             res.writeHead(403, { "Content-Type": "text/plain" });
             res.end("Forbidden");
             return;
@@ -691,7 +725,15 @@ Responses API request failed: ${errorMessage}
                 res.end("Missing response_id");
                 return;
             }
-            const include = parseResponseIncludes(urlObj.searchParams);
+            const includeResult = parseResponseIncludes(urlObj.searchParams);
+            if ("invalid" in includeResult) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({
+                    error: `Invalid include value(s): ${includeResult.invalid.join(", ")}`,
+                }, null, 2));
+                return;
+            }
+            const { include } = includeResult;
             const order = urlObj.searchParams.get("order");
             const after = urlObj.searchParams.get("after");
             const limit = parseNumber(urlObj.searchParams.get("limit"));
@@ -733,7 +775,15 @@ Responses API request failed: ${errorMessage}
                 res.end("Missing response_id");
                 return;
             }
-            const include = parseResponseIncludes(urlObj.searchParams);
+            const includeResult = parseResponseIncludes(urlObj.searchParams);
+            if ("invalid" in includeResult) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({
+                    error: `Invalid include value(s): ${includeResult.invalid.join(", ")}`,
+                }, null, 2));
+                return;
+            }
+            const { include } = includeResult;
             const stream = parseBoolean(urlObj.searchParams.get("stream"));
             const include_obfuscation = parseBoolean(urlObj.searchParams.get("include_obfuscation"));
             const starting_after = parseNumber(urlObj.searchParams.get("starting_after"));
