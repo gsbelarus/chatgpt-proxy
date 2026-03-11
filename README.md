@@ -168,6 +168,15 @@ Standard OpenAI Chat Completion response:
 
 Proxies requests to `POST https://api.openai.com/v1/responses`.
 
+The proxy also exposes the other documented Responses API operations:
+
+- `POST /openai2/compact` → `POST /v1/responses/compact`
+- `POST /openai2/input_tokens` → `POST /v1/responses/input_tokens`
+- `GET /openai2/:response_id` → `GET /v1/responses/:response_id`
+- `GET /openai2/:response_id/input_items` → `GET /v1/responses/:response_id/input_items`
+- `POST /openai2/:response_id/cancel` → `POST /v1/responses/:response_id/cancel`
+- `DELETE /openai2/:response_id` → `DELETE /v1/responses/:response_id`
+
 #### Request Body (JSON)
 
 | Field | Type | Required | Description |
@@ -420,6 +429,56 @@ curl -X POST http://localhost:3002/openai2 \
     "input": "Write a short poem about coding.",
     "stream": true
   }'
+```
+
+#### Retrieve Query Parameters
+
+`GET /openai2/:response_id` supports the documented Responses retrieval query parameters:
+
+- `include`
+- `stream`
+- `include_obfuscation`
+- `starting_after`
+- `timeout` (proxy-specific SDK timeout override)
+
+#### Input Items Query Parameters
+
+`GET /openai2/:response_id/input_items` supports:
+
+- `after`
+- `include`
+- `limit`
+- `order`
+- `timeout` (proxy-specific SDK timeout override)
+
+#### Example: Compact a Conversation
+
+```bash
+curl -X POST http://localhost:3002/openai2/compact \
+  -H "Content-Type: application/json" \
+  -d '{
+    "security_key": "your-secret-key",
+    "model": "gpt-5",
+    "input": "Summarize this long-running conversation."
+  }'
+```
+
+#### Example: Count Input Tokens
+
+```bash
+curl -X POST http://localhost:3002/openai2/input_tokens \
+  -H "Content-Type: application/json" \
+  -d '{
+    "security_key": "your-secret-key",
+    "model": "gpt-4o",
+    "input": "Count the tokens in this prompt."
+  }'
+```
+
+#### Example: List Input Items
+
+```bash
+curl "http://localhost:3002/openai2/resp_abc123/input_items?security_key=your-secret-key&limit=20&order=desc"
 ```
 
 #### Example: Structured Output (JSON Schema)
