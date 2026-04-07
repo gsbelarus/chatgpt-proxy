@@ -32,7 +32,7 @@ import { errors, infos, logErrorEvent, logInfoEvent } from "./proxyLogging.js";
 
 config({ path: [".env.local", ".env"] });
 
-const defaultModel = "gpt-5-nano";
+const defaultModel = "gpt-5.4-mini";
 type ChatGPTAPIConstructor = (typeof import("chatgpt"))["ChatGPTAPI"];
 type ChatGPTCompletionParams = NonNullable<
   ConstructorParameters<ChatGPTAPIConstructor>[0]["completionParams"]
@@ -1132,6 +1132,12 @@ export const server = http.createServer(async (req, res) => {
   }
 
   if (pathname === "/health") {
+    if (!checkAccess(urlObj)) {
+      res.writeHead(403, { "Content-Type": "text/plain" });
+      res.end("Forbidden");
+      return;
+    }
+
     try {
       const chatAPI = new ChatGPTAPI({
         apiKey: process.env.OPENAI_API_KEY as string,
@@ -1157,6 +1163,12 @@ export const server = http.createServer(async (req, res) => {
   }
 
   if (pathname === "/health2") {
+    if (!checkAccess(urlObj)) {
+      res.writeHead(403, { "Content-Type": "text/plain" });
+      res.end("Forbidden");
+      return;
+    }
+
     try {
       const openai = new OpenAI({
         apiKey: process.env.OPENAI_API_KEY as string,
