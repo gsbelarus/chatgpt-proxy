@@ -1,16 +1,24 @@
 {
   "compilerOptions": {
-     "target": "ESNext",
-     "module": "ESNext",
-     "rootDir": "./src",
-     "moduleResolution": "node",
-     "resolveJsonModule": true, /* in case you are importing JSON files */
-     "outDir": "./build",
-     "esModuleInterop": true,
-     "forceConsistentCasingInFileNames": true,
-     "strict": true,
-     "noImplicitAny": true,
-     "skipLibCheck": true,
-     "sourceMap": true
-  }
+    "target": "ESNext",
+    "module": "NodeNext",
+    "rootDir": "./src",
+    "moduleResolution": "NodeNext",
+    "resolveJsonModule": true, /* in case you are importing JSON files */
+    "outDir": "./build",
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "strict": true,
+    "noImplicitAny": true,
+    "skipLibCheck": true,
+    "sourceMap": true
+  },
+  "include": [
+    "src/**/*.ts"
+  ],
+  "exclude": [
+    "build",
+    "node_modules",
+    "tests"
+  ]
 }

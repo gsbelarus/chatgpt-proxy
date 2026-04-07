@@ -29,7 +29,22 @@ Create a `.env` or `.env.local` file in the project root:
 OPENAI_API_KEY=sk-...
 OPENAI_PROJECT_KEY=proj_...      # Optional
 SECURITY_KEY=your-secret-key     # Required for authenticated endpoints
+OPENAI_PROXY_UPSTREAM_TIMEOUT_MS=600000
+OPENAI_PROXY_UPSTREAM_MAX_TIMEOUT_MS=900000
+OPENAI_PROXY_MAX_PARALLEL_REQUESTS=32
 ```
+
+### Reliability Controls
+
+- `OPENAI_PROXY_UPSTREAM_TIMEOUT_MS` sets the upstream OpenAI SDK timeout used when a caller does not provide `timeout`.
+- `OPENAI_PROXY_UPSTREAM_MAX_TIMEOUT_MS` caps caller-provided `timeout` values. Values above the cap are clamped.
+- `OPENAI_PROXY_MAX_PARALLEL_REQUESTS` bounds concurrent OpenAI work inside the proxy. When the limit is reached, the proxy rejects new upstream work with `503` and `Retry-After: 1`.
+
+Default values:
+
+- default upstream timeout: `600000` ms
+- maximum upstream timeout: `900000` ms
+- maximum parallel requests: `32`
 
 ## Running
 
@@ -211,12 +226,67 @@ The proxy also exposes the other documented Responses API operations:
 #### Timeout Override Semantics
 
 - `timeout` is expressed in **milliseconds**.
-- For `POST` Responses endpoints, pass `timeout` as a JSON number, not a string.
-- For `GET`/`DELETE` Responses endpoints, pass `timeout` as a query parameter; numeric strings are parsed.
-- The proxy applies this value to the **single upstream OpenAI SDK request** for that operation. It is not a global session timeout and does not carry over to later retrieve, list, cancel, or delete calls.
-- Invalid, non-finite, or non-positive values are ignored and the SDK default is used instead.
-- Practical upper bound: **900000 ms** (15 minutes). The proxy's own HTTP request timeout is 15 minutes, so larger values do not extend the client-visible request beyond that limit.
-- This override is currently supported on the `/openai2` Responses routes listed below. Other proxy routes do not currently honor a `timeout` override.
+- For `POST` endpoints, pass `timeout` as a JSON number when possible. Numeric strings are also normalized safely.
+- For `GET`/`DELETE` Responses endpoints, pass `timeout` as a query parameter.
+- The proxy applies this value to the **single upstream OpenAI SDK request** for that operation. It does not carry over to later retrieve, list, cancel, or delete calls.
+- If no `timeout` is provided, the proxy uses `OPENAI_PROXY_UPSTREAM_TIMEOUT_MS`.
+- Missing, invalid, non-finite, or non-positive values fall back to `OPENAI_PROXY_UPSTREAM_TIMEOUT_MS`.
+- Values above `OPENAI_PROXY_UPSTREAM_MAX_TIMEOUT_MS` are clamped before the upstream SDK call is made.
+- If `OPENAI_PROXY_UPSTREAM_MAX_TIMEOUT_MS` is configured below `OPENAI_PROXY_UPSTREAM_TIMEOUT_MS`, the effective max becomes the default timeout.
+- The effective timeout is logged in the proxy's structured logs.
+
+The timeout policy is applied across the OpenAI-backed proxy routes, including `/openai`, `/openai2`, `/openai/audio/transcriptions`, and `/embeddings`.
+
+#### Error Responses
+
+OpenAI-facing routes now return structured JSON errors instead of generic plain-text `500` responses:
+
+```json
+{
+  "error": {
+    "message": "Timeout while waiting for OpenAI response",
+    "type": "upstream_timeout",
+    "code": "OPENAI_PROXY_TIMEOUT",
+    "requestId": "a7a27871-9d49-40c0-8c7b-7d44d2770ce8"
+  }
+}
+```
+
+Failure categories:
+
+- OpenAI API errors with an upstream HTTP status preserve that status and include sanitized upstream metadata.
+- Transport timeouts without a valid upstream response return `504`.
+- Transport failures such as DNS, TLS, socket reset, or other connection failures return `502`.
+- Local overload from the concurrency guard returns `503` with `Retry-After: 1`.
+- Validation failures return `400`.
+- Proxy auth failures remain `403`.
+- Client disconnects abort upstream work and are logged as cancellations instead of generic server failures.
+
+#### Retry Policy
+
+- Automatic retries are **disabled** for non-idempotent create-style calls such as `/openai`, `/openai2`, `/openai2/compact`, `/openai/audio/transcriptions`, and `/embeddings` to avoid duplicating billed work.
+- The official OpenAI SDK retry mechanism is still used on the safer read-only or idempotent operations exposed by the proxy:
+  - `POST /openai2/input_tokens`
+  - `GET /openai2/:response_id`
+  - `GET /openai2/:response_id/input_items`
+  - `DELETE /openai2/:response_id`
+- Retry attempts are logged with request ID, endpoint, attempt number, and sanitized failure details.
+
+#### Structured Logs
+
+Each OpenAI-backed request emits a structured completion log entry with:
+
+- request ID
+- endpoint and method
+- model when present
+- streaming flag
+- effective timeout and timeout source
+- start time and duration
+- final result category and returned HTTP status
+- retry count
+- overload and cancellation flags
+
+Secrets such as API keys, bearer tokens, proxy security keys, cookies, and access tokens are redacted before they are stored or printed.
 
 #### Include Options
 
