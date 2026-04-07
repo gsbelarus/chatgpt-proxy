@@ -532,7 +532,7 @@ async function handleAudioTranscription(
         file: audioFile,
         model,
         response_format: responseFormat,
-        language,
+        language: language || undefined,
         prompt,
         temperature,
         timestamp_granularities: timestampGranularities,

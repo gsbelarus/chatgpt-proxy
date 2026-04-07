@@ -134,13 +134,16 @@ export type ConcurrencyLease = {
 };
 
 export class ConcurrencyLimiter {
+  private current = 0;
+
   constructor(private readonly maxParallelRequests: number) {}
 
   tryAcquire(): ConcurrencyLease | null {
-    if (metrics.currentParallelRequests >= this.maxParallelRequests) {
+    if (this.current >= this.maxParallelRequests) {
       return null;
     }
 
+    this.current += 1;
     metrics.beginRequest();
     let released = false;
 
@@ -151,6 +154,7 @@ export class ConcurrencyLimiter {
         }
 
         released = true;
+        this.current -= 1;
         metrics.endRequest();
       },
     };
@@ -333,19 +337,21 @@ export function normalizeTimeout(rawTimeout: unknown): NormalizedTimeout {
     };
   }
 
-  const parsedTimeout =
+  const rawParsed =
     typeof rawTimeout === "number"
       ? rawTimeout
       : typeof rawTimeout === "string"
         ? Number(rawTimeout)
         : Number.NaN;
 
-  if (!Number.isFinite(parsedTimeout) || parsedTimeout <= 0) {
+  if (!Number.isFinite(rawParsed) || rawParsed <= 0) {
     return {
       timeoutMs: proxyConfig.openaiDefaultTimeoutMs,
       source: "invalid",
     };
   }
+
+  const parsedTimeout = Math.trunc(rawParsed);
 
   if (parsedTimeout > proxyConfig.openaiMaxTimeoutMs) {
     return {
@@ -765,7 +771,9 @@ export function sendSseHeaders(res: http.ServerResponse): boolean {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
     Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
   });
+  res.flushHeaders();
 
   return true;
 }
