@@ -32,7 +32,7 @@ import { errors, infos, logErrorEvent, logInfoEvent } from "./proxyLogging.js";
 
 config({ path: [".env.local", ".env"] });
 
-const defaultModel = "gpt-5.4-mini";
+const defaultModel = process.env.DEFAULT_MODEL ?? "gpt-5.4-mini";
 type ChatGPTAPIConstructor = (typeof import("chatgpt"))["ChatGPTAPI"];
 type ChatGPTCompletionParams = NonNullable<
   ConstructorParameters<ChatGPTAPIConstructor>[0]["completionParams"]
