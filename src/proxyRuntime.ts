@@ -32,7 +32,6 @@ export type RequestSafety = "create" | "safe";
 
 export type TimeoutOrigin =
   | "openai_sdk_timeout"
-  | "local_timeout_policy"
   | "undici_connect_timeout"
   | "undici_headers_timeout"
   | "undici_body_timeout"
@@ -396,7 +395,6 @@ export type RequestContext = {
   disconnectReason?: string;
   overload: boolean;
   cancellation: boolean;
-  abortReason?: "client_disconnect" | "timeout_policy";
   upstreamAbortAttempted: boolean;
   upstreamAbortSucceeded: boolean;
   addAbortHandler: (handler: () => void) => void;
@@ -478,7 +476,6 @@ export function createRequestContext(
     clientDisconnected: false,
     overload: false,
     cancellation: false,
-    abortReason: undefined,
     upstreamAbortAttempted: false,
     upstreamAbortSucceeded: false,
     addAbortHandler: (handler: () => void) => {
@@ -505,7 +502,6 @@ export function createRequestContext(
 
     context.clientDisconnected = true;
     context.cancellation = true;
-    context.abortReason = "client_disconnect";
     context.disconnectReason = reason;
     context.upstreamAbortAttempted =
       !abortController.signal.aborted || abortHandlers.size > 0;
@@ -793,10 +789,6 @@ function inferTimeoutOrigin(
 
   if (errorCode === "UND_ERR_BODY_TIMEOUT") {
     return "undici_body_timeout";
-  }
-
-  if (context.abortReason === "timeout_policy") {
-    return "local_timeout_policy";
   }
 
   if (

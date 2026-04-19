@@ -1122,6 +1122,10 @@ export const server = http.createServer(async (req, res) => {
     "Access-Control-Allow-Headers",
     "Origin, X-Requested-With, Content-Type, Accept, X-Request-Id",
   );
+  res.setHeader(
+    "Access-Control-Expose-Headers",
+    "X-Proxy-Request-Id, X-Incoming-Request-Id, Retry-After",
+  );
 
   if (req.method === "OPTIONS") {
     res.writeHead(200);

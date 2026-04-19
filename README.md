@@ -301,7 +301,7 @@ Each OpenAI-backed request emits a structured completion log entry with:
 - model when present
 - streaming flag
 - effective timeout and timeout source
-- timeout origin for timeout-like failures: `openai_sdk_timeout`, `undici_connect_timeout`, `undici_headers_timeout`, `undici_body_timeout`, or `local_timeout_policy`
+- timeout origin for timeout-like failures: `openai_sdk_timeout`, `undici_connect_timeout`, `undici_headers_timeout`, `undici_body_timeout`, or `unknown_timeout`
 - top-level error name, code, and message for failed requests
 - sanitized error cause chain for failed requests when present
 - start time and duration

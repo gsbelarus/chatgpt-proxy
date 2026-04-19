@@ -302,7 +302,7 @@ test("runtime diagnostics snapshot includes timeout config and request ID behavi
     timeout: proxyConfig.serverTimeoutMs,
     keepAliveTimeout: proxyConfig.serverTimeoutMs,
     headersTimeout: proxyConfig.serverTimeoutMs + 50_000,
-  } as http.Server);
+  });
 
   assert.equal(
     snapshot.timeouts.defaultUpstreamTimeoutMs,
