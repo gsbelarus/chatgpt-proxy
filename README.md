@@ -31,6 +31,9 @@ OPENAI_PROJECT_KEY=proj_...      # Optional
 SECURITY_KEY=your-secret-key     # Required for authenticated endpoints
 OPENAI_PROXY_UPSTREAM_TIMEOUT_MS=600000
 OPENAI_PROXY_UPSTREAM_MAX_TIMEOUT_MS=900000
+OPENAI_PROXY_TRANSPORT_CONNECT_TIMEOUT_MS=30000
+OPENAI_PROXY_TRANSPORT_HEADERS_TIMEOUT_MS=905000
+OPENAI_PROXY_TRANSPORT_BODY_TIMEOUT_MS=905000
 OPENAI_PROXY_MAX_PARALLEL_REQUESTS=32
 ```
 
@@ -38,12 +41,20 @@ OPENAI_PROXY_MAX_PARALLEL_REQUESTS=32
 
 - `OPENAI_PROXY_UPSTREAM_TIMEOUT_MS` sets the upstream OpenAI SDK timeout used when a caller does not provide `timeout`.
 - `OPENAI_PROXY_UPSTREAM_MAX_TIMEOUT_MS` caps caller-provided `timeout` values. Values above the cap are clamped.
+- `OPENAI_PROXY_TRANSPORT_CONNECT_TIMEOUT_MS` sets the explicit undici connect timeout for outbound OpenAI requests.
+- `OPENAI_PROXY_TRANSPORT_HEADERS_TIMEOUT_MS` sets the explicit undici response-headers timeout for outbound OpenAI requests.
+- `OPENAI_PROXY_TRANSPORT_BODY_TIMEOUT_MS` sets the explicit undici response-body idle timeout for outbound OpenAI requests.
 - `OPENAI_PROXY_MAX_PARALLEL_REQUESTS` bounds concurrent OpenAI work inside the proxy. When the limit is reached, the proxy rejects new upstream work with `503` and `Retry-After: 1`.
+
+By default, the transport `headersTimeout` and `bodyTimeout` are set above the proxy's maximum upstream timeout so undici does not terminate long-running `/openai2` calls earlier than the configured OpenAI SDK budget unless an operator explicitly chooses a lower transport timeout.
 
 Default values:
 
 - default upstream timeout: `600000` ms
 - maximum upstream timeout: `900000` ms
+- transport connect timeout: `30000` ms
+- transport headers timeout: `OPENAI_PROXY_UPSTREAM_MAX_TIMEOUT_MS + 5000`
+- transport body timeout: `OPENAI_PROXY_UPSTREAM_MAX_TIMEOUT_MS + 5000`
 - maximum parallel requests: `32`
 
 ## Running
@@ -247,10 +258,17 @@ OpenAI-facing routes now return structured JSON errors instead of generic plain-
     "message": "Timeout while waiting for OpenAI response",
     "type": "upstream_timeout",
     "code": "OPENAI_PROXY_TIMEOUT",
-    "requestId": "a7a27871-9d49-40c0-8c7b-7d44d2770ce8"
+    "requestId": "a7a27871-9d49-40c0-8c7b-7d44d2770ce8",
+    "incomingRequestId": "edge-request-id-from-x-request-id"
   }
 }
 ```
+
+Correlation fields:
+
+- `requestId` is the proxy-local request UUID generated inside `chatgpt-proxy`.
+- `incomingRequestId` is the incoming `x-request-id` preserved from the caller or outer reverse proxy when present.
+- Error responses also include `X-Proxy-Request-Id` and, when available, `X-Incoming-Request-Id` response headers.
 
 Failure categories:
 
@@ -277,16 +295,38 @@ Failure categories:
 Each OpenAI-backed request emits a structured completion log entry with:
 
 - request ID
+- incoming request ID when provided on `x-request-id`
+- OpenAI request ID when OpenAI returns `x-request-id`
 - endpoint and method
 - model when present
 - streaming flag
 - effective timeout and timeout source
+- timeout origin for timeout-like failures: `openai_sdk_timeout`, `undici_connect_timeout`, `undici_headers_timeout`, `undici_body_timeout`, or `local_timeout_policy`
+- top-level error name, code, and message for failed requests
+- sanitized error cause chain for failed requests when present
 - start time and duration
 - final result category and returned HTTP status
 - retry count
 - overload and cancellation flags
 
 Secrets such as API keys, bearer tokens, proxy security keys, cookies, and access tokens are redacted before they are stored or printed.
+
+#### Runtime Timeout Diagnostics
+
+Operators can inspect the live timeout and correlation configuration without reading source:
+
+```bash
+curl "http://localhost:3002/debug/runtime?access_token=YOUR_ACCESS_TOKEN"
+```
+
+The guarded runtime snapshot includes:
+
+- default and maximum upstream timeout
+- explicit undici connect, headers, and body timeout values
+- Node HTTP server request, socket, keep-alive, and headers timeouts
+- maximum parallel request limit
+- request ID preservation behavior and response field names
+- the effective retry policy for each OpenAI-backed proxy route
 
 #### Include Options
 
@@ -945,6 +985,9 @@ docker run -p 3002:3002 --env-file .env chatgpt-proxy
 - **Request Timeout:** 15 minutes (900,000 ms)
 - **Keep-Alive Timeout:** 15 minutes
 - **Headers Timeout:** ~16 minutes
+- **OpenAI Transport Connect Timeout:** 30 seconds by default
+- **OpenAI Transport Headers Timeout:** max upstream timeout + 5 seconds by default
+- **OpenAI Transport Body Timeout:** max upstream timeout + 5 seconds by default
 
 Client timeout overrides cannot increase these server-side HTTP limits.
 

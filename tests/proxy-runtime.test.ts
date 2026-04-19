@@ -1,4 +1,4 @@
-import test, { after, before } from "node:test";
+import test, { after, before, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 
@@ -6,16 +6,18 @@ import OpenAI from "openai";
 
 import {
   badRequestError,
+  buildRuntimeDiagnosticsSnapshot,
   buildOpenAIRequestOptions,
   classifyProxyError,
   ConcurrencyLimiter,
   createRequestContext,
   handleRequestError,
   normalizeTimeout,
+  proxyEndpointRetryPolicies,
   proxyConfig,
   resolveUpstreamTimeoutConfig,
 } from "../src/proxyRuntime.js";
-import { sanitizeForLog } from "../src/proxyLogging.js";
+import { errors, infos, sanitizeForLog } from "../src/proxyLogging.js";
 
 const originalConsole = {
   debug: console.debug,
@@ -35,6 +37,11 @@ after(() => {
   console.log = originalConsole.log;
 });
 
+beforeEach(() => {
+  errors.length = 0;
+  infos.length = 0;
+});
+
 class MockResponse extends EventEmitter {
   writableEnded = false;
   destroyed = false;
@@ -45,7 +52,7 @@ class MockResponse extends EventEmitter {
 
   writeHead(statusCode: number, headers: Record<string, string>) {
     this.statusCode = statusCode;
-    this.headers = headers;
+    this.headers = { ...this.headers, ...headers };
     this.headersSent = true;
     return this;
   }
@@ -78,6 +85,14 @@ class MockRequest extends EventEmitter {
   setTimeout() {
     return this;
   }
+}
+
+function createUndiciTimeoutError(code: string, causeMessage: string): Error {
+  const cause = new Error(causeMessage);
+  cause.name = "UndiciTimeoutError";
+  (cause as Error & { code?: string }).code = code;
+
+  return new Error("fetch failed", { cause });
 }
 
 test("normalizeTimeout uses the configured default when no timeout is provided", () => {
@@ -118,7 +133,11 @@ test("buildOpenAIRequestOptions passes the normalized numeric timeout upstream",
     { endpoint: "/openai2", method: "POST" },
   );
 
-  const requestOptions = buildOpenAIRequestOptions(context, "610000", "unsafe");
+  const requestOptions = buildOpenAIRequestOptions(
+    context,
+    "610000",
+    proxyEndpointRetryPolicies["/openai2"],
+  );
 
   assert.equal(requestOptions.timeout, 610_000);
   assert.equal(typeof requestOptions.timeout, "number");
@@ -146,21 +165,42 @@ test("classifyProxyError preserves upstream API status codes", () => {
   context.cleanup();
 });
 
-test("classifyProxyError maps OpenAI connection timeouts to 504", () => {
-  const context = createRequestContext(
-    new MockRequest() as unknown as any,
-    new MockResponse() as unknown as any,
-    { endpoint: "/openai2", method: "POST" },
-  );
+test("classifyProxyError distinguishes SDK and undici timeout sources", () => {
+  const cases = [
+    {
+      error: new OpenAI.APIConnectionTimeoutError(),
+      expected: "openai_sdk_timeout",
+    },
+    {
+      error: createUndiciTimeoutError(
+        "UND_ERR_HEADERS_TIMEOUT",
+        "Headers Timeout Error",
+      ),
+      expected: "undici_headers_timeout",
+    },
+    {
+      error: createUndiciTimeoutError(
+        "UND_ERR_BODY_TIMEOUT",
+        "Body Timeout Error",
+      ),
+      expected: "undici_body_timeout",
+    },
+  ];
 
-  const classified = classifyProxyError(
-    new OpenAI.APIConnectionTimeoutError(),
-    context,
-  );
+  for (const testCase of cases) {
+    const context = createRequestContext(
+      new MockRequest() as unknown as any,
+      new MockResponse() as unknown as any,
+      { endpoint: "/openai2", method: "POST" },
+    );
 
-  assert.equal(classified.status, 504);
-  assert.equal(classified.type, "upstream_timeout");
-  context.cleanup();
+    const classified = classifyProxyError(testCase.error, context);
+
+    assert.equal(classified.status, 504);
+    assert.equal(classified.type, "upstream_timeout");
+    assert.equal(classified.timeoutOrigin, testCase.expected);
+    context.cleanup();
+  }
 });
 
 test("classifyProxyError maps transport failures to 502", () => {
@@ -193,6 +233,104 @@ test("bad request errors map to structured 400 responses", () => {
   assert.equal(res.statusCode, 400);
   assert.match(res.body, /OPENAI_PROXY_BAD_REQUEST/);
   context.cleanup();
+});
+
+test("incoming request ID is preserved in error payloads and structured logs", () => {
+  const req = new MockRequest();
+  const res = new MockResponse();
+  req.headers["x-request-id"] = "edge-123";
+  const context = createRequestContext(
+    req as unknown as any,
+    res as unknown as any,
+    { endpoint: "/openai2", method: "POST" },
+  );
+
+  handleRequestError(
+    context,
+    res as unknown as any,
+    createUndiciTimeoutError(
+      "UND_ERR_HEADERS_TIMEOUT",
+      "Headers Timeout Error",
+    ),
+  );
+
+  const payload = JSON.parse(res.body) as {
+    error: { requestId: string; incomingRequestId?: string };
+  };
+  const logEntry = JSON.parse(errors.at(-1)?.message ?? "{}") as {
+    requestId?: string;
+    incomingRequestId?: string;
+    timeoutOrigin?: string;
+    errorCode?: string;
+    errorMessage?: string;
+    errorCauseChain?: Array<{ message: string }>;
+  };
+
+  assert.equal(payload.error.requestId, context.requestId);
+  assert.equal(payload.error.incomingRequestId, "edge-123");
+  assert.equal(res.headers["X-Incoming-Request-Id"], "edge-123");
+  assert.equal(logEntry.requestId, context.requestId);
+  assert.equal(logEntry.incomingRequestId, "edge-123");
+  assert.equal(logEntry.timeoutOrigin, "undici_headers_timeout");
+  assert.equal(logEntry.errorCode, "UND_ERR_HEADERS_TIMEOUT");
+  assert.equal(logEntry.errorMessage, "fetch failed");
+  assert.equal(logEntry.errorCauseChain?.at(0)?.message, "Headers Timeout Error");
+  context.cleanup();
+});
+
+test("create-style routes keep zero retries by default", () => {
+  const createRoutes = [
+    "/openai",
+    "/openai2",
+    "/openai2/compact",
+    "/openai/audio/transcriptions",
+    "/embeddings",
+  ] as const;
+
+  for (const endpoint of createRoutes) {
+    const policy = proxyEndpointRetryPolicies[endpoint];
+
+    assert.equal(policy.maxRetries, 0);
+    assert.equal(policy.idempotent, false);
+    assert.equal(policy.requestSafety, "create");
+  }
+});
+
+test("runtime diagnostics snapshot includes timeout config and request ID behavior", () => {
+  const snapshot = buildRuntimeDiagnosticsSnapshot({
+    requestTimeout: proxyConfig.serverTimeoutMs,
+    timeout: proxyConfig.serverTimeoutMs,
+    keepAliveTimeout: proxyConfig.serverTimeoutMs,
+    headersTimeout: proxyConfig.serverTimeoutMs + 50_000,
+  } as http.Server);
+
+  assert.equal(
+    snapshot.timeouts.defaultUpstreamTimeoutMs,
+    proxyConfig.openaiDefaultTimeoutMs,
+  );
+  assert.equal(
+    snapshot.timeouts.maxUpstreamTimeoutMs,
+    proxyConfig.openaiMaxTimeoutMs,
+  );
+  assert.equal(
+    snapshot.timeouts.serverHeadersTimeoutMs,
+    proxyConfig.serverTimeoutMs + 50_000,
+  );
+  assert.equal(
+    snapshot.timeouts.serverKeepAliveTimeoutMs,
+    proxyConfig.serverTimeoutMs,
+  );
+  assert.equal(snapshot.limits.maxParallelRequests, proxyConfig.maxParallelRequests);
+  assert.equal(snapshot.requestIds.incomingHeader, "x-request-id");
+  assert.equal(snapshot.requestIds.preserveIncoming, true);
+  assert.ok(
+    snapshot.retryPolicies.some(
+      (policy) =>
+        policy.endpoint === "/openai2" &&
+        policy.maxRetries === 0 &&
+        policy.requestSafety === "create",
+    ),
+  );
 });
 
 test("ConcurrencyLimiter rejects work once the limit is reached", () => {

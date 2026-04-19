@@ -11,6 +11,7 @@ import type {
 
 import {
   badRequestError,
+  buildRuntimeDiagnosticsSnapshot,
   buildOpenAIRequestOptions,
   concurrencyLimiter,
   createOpenAIClient,
@@ -21,6 +22,7 @@ import {
   handleRequestError,
   metrics,
   overloadError,
+  proxyEndpointRetryPolicies,
   proxyConfig,
   sendJson,
   sendSseHeaders,
@@ -348,7 +350,7 @@ async function handleOpenAIChatCompletion(
     const requestOptions = buildOpenAIRequestOptions(
       context,
       timeout,
-      "unsafe",
+      proxyEndpointRetryPolicies["/openai"],
     );
     const openai = createOpenAIClient(
       {
@@ -373,9 +375,9 @@ async function handleOpenAIChatCompletion(
         ? { type: "image_url", image_url: { url: imageUrl } }
         : imageBase64
           ? {
-              type: "image_url",
-              image_url: { url: `data:image/png;base64,${imageBase64}` },
-            }
+            type: "image_url",
+            image_url: { url: `data:image/png;base64,${imageBase64}` },
+          }
           : null;
 
       if (!imagePart) {
@@ -513,7 +515,7 @@ async function handleAudioTranscription(
     const requestOptions = buildOpenAIRequestOptions(
       context,
       timeoutValue,
-      "unsafe",
+      proxyEndpointRetryPolicies["/openai/audio/transcriptions"],
     );
     const openai = createOpenAIClient(
       {
@@ -580,7 +582,7 @@ async function handleResponsesCreate(
     const requestOptions = buildOpenAIRequestOptions(
       context,
       timeout,
-      "unsafe",
+      proxyEndpointRetryPolicies["/openai2"],
     );
     const openai = createOpenAIClient(
       {
@@ -675,7 +677,7 @@ async function handleResponsesCompact(
     const requestOptions = buildOpenAIRequestOptions(
       context,
       timeout,
-      "unsafe",
+      proxyEndpointRetryPolicies["/openai2/compact"],
     );
     const openai = createOpenAIClient(
       {
@@ -728,7 +730,11 @@ async function handleResponsesInputTokens(
 
     context.model = getString(inputTokensPayload.model);
 
-    const requestOptions = buildOpenAIRequestOptions(context, timeout, "safe");
+    const requestOptions = buildOpenAIRequestOptions(
+      context,
+      timeout,
+      proxyEndpointRetryPolicies["/openai2/input_tokens"],
+    );
     const openai = createOpenAIClient(
       {
         openai_api_key: getString(openai_api_key),
@@ -789,7 +795,7 @@ async function handleResponsesInputItems(
     const requestOptions = buildOpenAIRequestOptions(
       context,
       urlObj.searchParams.get("timeout"),
-      "safe",
+      proxyEndpointRetryPolicies["/openai2/:response_id/input_items"],
     );
     const openai = createOpenAIClient(
       {
@@ -810,7 +816,7 @@ async function handleResponsesInputItems(
         limit: parseNumber(urlObj.searchParams.get("limit")),
         order:
           urlObj.searchParams.get("order") === "asc" ||
-          urlObj.searchParams.get("order") === "desc"
+            urlObj.searchParams.get("order") === "desc"
             ? (urlObj.searchParams.get("order") as "asc" | "desc")
             : undefined,
       },
@@ -861,7 +867,7 @@ async function handleResponsesRetrieve(
     const requestOptions = buildOpenAIRequestOptions(
       context,
       urlObj.searchParams.get("timeout"),
-      "safe",
+      proxyEndpointRetryPolicies["/openai2/:response_id"],
     );
     const openai = createOpenAIClient(
       {
@@ -954,7 +960,7 @@ async function handleResponsesCancel(
     const requestOptions = buildOpenAIRequestOptions(
       context,
       timeout,
-      "unsafe",
+      proxyEndpointRetryPolicies["/openai2/:response_id/cancel"],
     );
     const openai = createOpenAIClient(
       {
@@ -1003,7 +1009,7 @@ async function handleResponsesDelete(
     const requestOptions = buildOpenAIRequestOptions(
       context,
       urlObj.searchParams.get("timeout"),
-      "safe",
+      proxyEndpointRetryPolicies["/openai2/:response_id"],
     );
     const openai = createOpenAIClient(
       {
@@ -1064,7 +1070,7 @@ async function handleEmbeddings(
     const requestOptions = buildOpenAIRequestOptions(
       context,
       timeout,
-      "unsafe",
+      proxyEndpointRetryPolicies["/embeddings"],
     );
     const openai = createOpenAIClient(
       {
@@ -1114,7 +1120,7 @@ export const server = http.createServer(async (req, res) => {
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
   res.setHeader(
     "Access-Control-Allow-Headers",
-    "Origin, X-Requested-With, Content-Type, Accept",
+    "Origin, X-Requested-With, Content-Type, Accept, X-Request-Id",
   );
 
   if (req.method === "OPTIONS") {
@@ -1201,6 +1207,17 @@ export const server = http.createServer(async (req, res) => {
 
     res.writeHead(200, { "Content-Type": "text/html" });
     res.end(renderLogPage(pathname));
+    return;
+  }
+
+  if (pathname === "/debug/runtime") {
+    if (!checkAccess(urlObj)) {
+      res.writeHead(403, { "Content-Type": "text/plain" });
+      res.end("Forbidden");
+      return;
+    }
+
+    sendJson(res, 200, buildRuntimeDiagnosticsSnapshot(server));
     return;
   }
 
@@ -1325,9 +1342,6 @@ const port = 3002;
 server.listen(port, () => {
   logInfoEvent("proxy.server.started", {
     port,
-    defaultTimeoutMs: proxyConfig.openaiDefaultTimeoutMs,
-    maxTimeoutMs: proxyConfig.openaiMaxTimeoutMs,
-    maxParallelRequests: proxyConfig.maxParallelRequests,
-    socketTimeoutMs: proxyConfig.serverTimeoutMs,
+    ...buildRuntimeDiagnosticsSnapshot(server),
   });
 });
