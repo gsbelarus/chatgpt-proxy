@@ -1,6 +1,6 @@
 # chatgpt-proxy
 
-A lightweight HTTP proxy server for OpenAI APIs. It wraps the official OpenAI SDK and exposes simplified endpoints for chat completions, audio transcriptions, and embeddings with built-in authentication, logging, and metrics.
+A lightweight HTTP proxy server for OpenAI and Anthropic APIs. It wraps the official OpenAI and Anthropic SDKs and exposes simplified endpoints for chat completions, audio transcriptions, embeddings, and Claude messages with built-in authentication, logging, and metrics.
 
 ## Features
 
@@ -8,6 +8,7 @@ A lightweight HTTP proxy server for OpenAI APIs. It wraps the official OpenAI SD
 - **Chat Completions** — Full OpenAI Chat Completions API support including vision (images)
 - **Audio Transcriptions** — Whisper-based speech-to-text
 - **Embeddings** — Generate text embeddings
+- **Claude Messages** — Anthropic Claude API with streaming, tools, thinking, and structured outputs
 - **Simple Chat** — Simplified `/chatgpt` endpoint for quick prompts
 - **Health Checks** — Built-in health endpoints
 - **Logging & Metrics** — Request/response logs, token usage stats, error tracking
@@ -28,6 +29,7 @@ Create a `.env` or `.env.local` file in the project root:
 ```env
 OPENAI_API_KEY=sk-...
 OPENAI_PROJECT_KEY=proj_...      # Optional
+ANTHROPIC_API_KEY=sk-ant-...     # Required for /claude endpoint
 SECURITY_KEY=your-secret-key     # Required for authenticated endpoints
 OPENAI_PROXY_UPSTREAM_TIMEOUT_MS=600000
 OPENAI_PROXY_UPSTREAM_MAX_TIMEOUT_MS=900000
@@ -950,6 +952,203 @@ curl -X POST http://localhost:3002/embeddings \
 
 ---
 
+### `POST /claude`
+
+**Anthropic Claude Messages API endpoint** — Chat with Claude models including support for streaming, tools, thinking, and structured outputs.
+
+Proxies requests to the Anthropic Messages API via the official `@anthropic-ai/sdk`.
+
+#### Request Body (JSON)
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `security_key` | string | ✅ | Must match `SECURITY_KEY` env variable |
+| `anthropic_api_key` | string | ❌ | Override the default Anthropic API key |
+| `timeout` | number | ❌ | Proxy-level request timeout in milliseconds |
+| `stream` | boolean | ❌ | Enable Server-Sent Events streaming (default: `false`) |
+| `model` | string | ✅ | Model ID (e.g., `claude-sonnet-4-20250514`, `claude-opus-4-20250514`) |
+| `messages` | array | ✅ | Array of message objects (`role` + `content`) |
+| `system` | string/array | ❌ | System prompt |
+| `max_tokens` | integer | ✅ | Maximum number of tokens to generate |
+| `temperature` | number | ❌ | Sampling temperature (0-1) |
+| `top_p` | number | ❌ | Nucleus sampling |
+| `top_k` | integer | ❌ | Top-K sampling |
+| `tools` | array | ❌ | Tool definitions for function calling |
+| `tool_choice` | object | ❌ | How model should use tools (`auto`, `any`, `tool`) |
+| `thinking` | object | ❌ | Extended thinking configuration |
+| `output_config` | object | ❌ | Structured output configuration (JSON schema) |
+| `metadata` | object | ❌ | Request metadata (e.g., `user_id`) |
+| `stop_sequences` | array | ❌ | Custom stop sequences |
+
+#### Example: Simple Chat
+
+```bash
+curl -X POST http://localhost:3002/claude \
+  -H "Content-Type: application/json" \
+  -d '{
+    "security_key": "your-secret-key",
+    "model": "claude-sonnet-4-20250514",
+    "max_tokens": 1024,
+    "messages": [
+      {"role": "user", "content": "What is TypeScript?"}
+    ]
+  }'
+```
+
+#### Example: With System Prompt
+
+```bash
+curl -X POST http://localhost:3002/claude \
+  -H "Content-Type: application/json" \
+  -d '{
+    "security_key": "your-secret-key",
+    "model": "claude-sonnet-4-20250514",
+    "max_tokens": 2048,
+    "system": "You are a senior software engineer. Always provide code examples.",
+    "messages": [
+      {"role": "user", "content": "How do I implement a binary search in Python?"}
+    ],
+    "temperature": 0.7
+  }'
+```
+
+#### Example: Streaming
+
+```bash
+curl -X POST http://localhost:3002/claude \
+  -H "Content-Type: application/json" \
+  -d '{
+    "security_key": "your-secret-key",
+    "model": "claude-sonnet-4-20250514",
+    "max_tokens": 1024,
+    "messages": [
+      {"role": "user", "content": "Write a short poem about coding."}
+    ],
+    "stream": true
+  }'
+```
+
+#### Example: Function Calling (Tools)
+
+```bash
+curl -X POST http://localhost:3002/claude \
+  -H "Content-Type: application/json" \
+  -d '{
+    "security_key": "your-secret-key",
+    "model": "claude-sonnet-4-20250514",
+    "max_tokens": 1024,
+    "messages": [
+      {"role": "user", "content": "What is the weather in London?"}
+    ],
+    "tools": [
+      {
+        "name": "get_weather",
+        "description": "Get current weather for a location",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "location": { "type": "string", "description": "City name" }
+          },
+          "required": ["location"]
+        }
+      }
+    ],
+    "tool_choice": { "type": "auto" }
+  }'
+```
+
+#### Example: Structured Output (JSON Schema)
+
+```bash
+curl -X POST http://localhost:3002/claude \
+  -H "Content-Type: application/json" \
+  -d '{
+    "security_key": "your-secret-key",
+    "model": "claude-sonnet-4-20250514",
+    "max_tokens": 1024,
+    "messages": [
+      {"role": "user", "content": "Extract the name and age from: John is 30 years old."}
+    ],
+    "output_config": {
+      "format": {
+        "type": "json_schema",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" },
+            "age": { "type": "integer" }
+          },
+          "required": ["name", "age"],
+          "additionalProperties": false
+        }
+      }
+    }
+  }'
+```
+
+#### Example: Extended Thinking
+
+```bash
+curl -X POST http://localhost:3002/claude \
+  -H "Content-Type: application/json" \
+  -d '{
+    "security_key": "your-secret-key",
+    "model": "claude-sonnet-4-20250514",
+    "max_tokens": 16000,
+    "messages": [
+      {"role": "user", "content": "Solve this step by step: What is 27^3 + 14^2?"}
+    ],
+    "thinking": {
+      "type": "enabled",
+      "budget_tokens": 10000
+    }
+  }'
+```
+
+#### Example: Multi-turn Conversation
+
+```bash
+curl -X POST http://localhost:3002/claude \
+  -H "Content-Type: application/json" \
+  -d '{
+    "security_key": "your-secret-key",
+    "model": "claude-sonnet-4-20250514",
+    "max_tokens": 1024,
+    "messages": [
+      {"role": "user", "content": "My name is Alice."},
+      {"role": "assistant", "content": "Hello Alice! Nice to meet you."},
+      {"role": "user", "content": "What is my name?"}
+    ]
+  }'
+```
+
+#### Response
+
+Standard Anthropic Messages API response:
+
+```json
+{
+  "id": "msg_01XFDUDYJgAACzvnptvVoYEL",
+  "type": "message",
+  "role": "assistant",
+  "content": [
+    {
+      "type": "text",
+      "text": "TypeScript is a strongly typed programming language..."
+    }
+  ],
+  "model": "claude-sonnet-4-20250514",
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 12,
+    "output_tokens": 150
+  }
+}
+```
+
+---
+
 ## Error Responses
 
 | Status | Description |
@@ -958,7 +1157,7 @@ curl -X POST http://localhost:3002/embeddings \
 | `403` | Forbidden — Invalid or missing `security_key` |
 | `404` | Not Found — Unknown endpoint |
 | `429` | Too Many Requests — Rate limit exceeded (health/log endpoints) |
-| `500` | Internal Server Error — OpenAI API error or server issue |
+| `500` | Internal Server Error — OpenAI/Anthropic API error or server issue |
 
 ---
 

@@ -195,6 +195,7 @@ export const proxyEndpointRetryPolicies = {
   "/openai2/:response_id/input_items": retryPolicies.safeIdempotent,
   "/openai2/:response_id/cancel": retryPolicies.unsafeCreate,
   "/embeddings": retryPolicies.unsafeCreate,
+  "/claude": retryPolicies.unsafeCreate,
 } as const satisfies Record<string, RequestRetryPolicy>;
 
 export function buildRuntimeDiagnosticsSnapshot(
@@ -324,7 +325,7 @@ export type ConcurrencyLease = {
 export class ConcurrencyLimiter {
   private current = 0;
 
-  constructor(private readonly maxParallelRequests: number) { }
+  constructor(private readonly maxParallelRequests: number) {}
 
   tryAcquire(): ConcurrencyLease | null {
     if (this.current >= this.maxParallelRequests) {

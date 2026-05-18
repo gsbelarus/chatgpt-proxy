@@ -1,6 +1,7 @@
 import http from "http";
 import { config } from "dotenv";
 import OpenAI, { toFile } from "openai";
+import Anthropic from "@anthropic-ai/sdk";
 import Busboy from "busboy";
 import { AudioResponseFormat } from "openai/resources";
 import type { ChatCompletionCreateParamsNonStreaming } from "openai/resources/chat/completions";
@@ -375,9 +376,9 @@ async function handleOpenAIChatCompletion(
         ? { type: "image_url", image_url: { url: imageUrl } }
         : imageBase64
           ? {
-            type: "image_url",
-            image_url: { url: `data:image/png;base64,${imageBase64}` },
-          }
+              type: "image_url",
+              image_url: { url: `data:image/png;base64,${imageBase64}` },
+            }
           : null;
 
       if (!imagePart) {
@@ -816,7 +817,7 @@ async function handleResponsesInputItems(
         limit: parseNumber(urlObj.searchParams.get("limit")),
         order:
           urlObj.searchParams.get("order") === "asc" ||
-            urlObj.searchParams.get("order") === "desc"
+          urlObj.searchParams.get("order") === "desc"
             ? (urlObj.searchParams.get("order") as "asc" | "desc")
             : undefined,
       },
@@ -1105,6 +1106,113 @@ async function handleEmbeddings(
   }
 }
 
+async function handleClaudeMessages(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): Promise<void> {
+  const context = createRequestContext(req, res, {
+    endpoint: "/claude",
+    method: req.method ?? "POST",
+  });
+  let lease: ConcurrencyLease | undefined;
+
+  try {
+    const data = await readJsonBody(req);
+    const {
+      security_key,
+      anthropic_api_key,
+      timeout,
+      stream,
+      ...claudePayload
+    } = data;
+
+    ensureSecurityKey(security_key);
+
+    context.model = getString(claudePayload.model);
+    context.stream = Boolean(stream);
+
+    const requestOptions = buildOpenAIRequestOptions(
+      context,
+      timeout,
+      proxyEndpointRetryPolicies["/claude"],
+    );
+
+    const anthropic = new Anthropic({
+      apiKey:
+        getString(anthropic_api_key) ||
+        (process.env.ANTHROPIC_API_KEY as string),
+      timeout: requestOptions.timeout,
+      maxRetries: requestOptions.maxRetries,
+    });
+
+    lease = acquireLease();
+
+    if (stream) {
+      if (!sendSseHeaders(res)) {
+        return;
+      }
+
+      const messageStream = anthropic.messages.stream(
+        claudePayload as unknown as Anthropic.MessageCreateParams,
+        { signal: requestOptions.signal },
+      );
+
+      context.addAbortHandler(() => {
+        messageStream.abort();
+      });
+
+      const onStreamEvent = (event: unknown) => {
+        if (!context.clientDisconnected) {
+          writeSseEvent(res, event);
+        }
+      };
+
+      messageStream.on(
+        "streamEvent",
+        onStreamEvent as (...args: unknown[]) => void,
+      );
+
+      try {
+        const finalMessage = await messageStream.finalMessage();
+
+        if (!context.clientDisconnected) {
+          endSse(res);
+          finalizeSuccessfulRequest(context, 200, {
+            promptTokens: finalMessage.usage?.input_tokens,
+            completionTokens: finalMessage.usage?.output_tokens,
+          });
+        }
+      } finally {
+        messageStream.off(
+          "streamEvent",
+          onStreamEvent as (...args: unknown[]) => void,
+        );
+      }
+
+      return;
+    }
+
+    const response = await anthropic.messages.create(
+      {
+        ...claudePayload,
+        stream: false,
+      } as unknown as Anthropic.MessageCreateParamsNonStreaming,
+      { signal: requestOptions.signal },
+    );
+
+    sendJson(res, 200, response);
+    finalizeSuccessfulRequest(context, 200, {
+      promptTokens: response.usage?.input_tokens,
+      completionTokens: response.usage?.output_tokens,
+    });
+  } catch (error: unknown) {
+    handleRequestError(context, res, error);
+  } finally {
+    lease?.release();
+    context.cleanup();
+  }
+}
+
 export const server = http.createServer(async (req, res) => {
   const urlObj = parseRequestUrl(req);
 
@@ -1329,6 +1437,11 @@ export const server = http.createServer(async (req, res) => {
 
   if (pathname === "/embeddings" && req.method === "POST") {
     await handleEmbeddings(req, res);
+    return;
+  }
+
+  if (pathname === "/claude" && req.method === "POST") {
+    await handleClaudeMessages(req, res);
     return;
   }
 
