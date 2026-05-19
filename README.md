@@ -1,11 +1,12 @@
 # chatgpt-proxy
 
-A lightweight HTTP proxy server for OpenAI APIs. It wraps the official OpenAI SDK and exposes simplified endpoints for chat completions, audio transcriptions, and embeddings with built-in authentication, logging, and metrics.
+A lightweight HTTP proxy server for OpenAI and Anthropic APIs. It wraps the official OpenAI and Anthropic SDKs and exposes simplified endpoints for chat completions, audio transcriptions, embeddings, and Claude messages with built-in authentication, logging, and metrics.
 
 ## Features
 
 - **Responses API** — OpenAI's most advanced interface with tools, web search, file search, MCP, function calling, and streaming
 - **Chat Completions** — Full OpenAI Chat Completions API support including vision (images)
+- **Anthropic Claude** — Anthropic Messages API with streaming, vision, tool use, and extended thinking
 - **Audio Transcriptions** — Whisper-based speech-to-text
 - **Embeddings** — Generate text embeddings
 - **Simple Chat** — Simplified `/chatgpt` endpoint for quick prompts
@@ -28,6 +29,7 @@ Create a `.env` or `.env.local` file in the project root:
 ```env
 OPENAI_API_KEY=sk-...
 OPENAI_PROJECT_KEY=proj_...      # Optional
+ANTHROPIC_API_KEY=sk-ant-...     # Required for /anthropic endpoints
 SECURITY_KEY=your-secret-key     # Required for authenticated endpoints
 OPENAI_PROXY_UPSTREAM_TIMEOUT_MS=600000
 OPENAI_PROXY_UPSTREAM_MAX_TIMEOUT_MS=900000
@@ -255,7 +257,7 @@ OpenAI-facing routes now return structured JSON errors instead of generic plain-
 ```json
 {
   "error": {
-    "message": "Timeout while waiting for OpenAI response",
+    "message": "Timeout while waiting for upstream response",
     "type": "upstream_timeout",
     "code": "OPENAI_PROXY_TIMEOUT",
     "requestId": "a7a27871-9d49-40c0-8c7b-7d44d2770ce8",
@@ -301,8 +303,8 @@ Each OpenAI-backed request emits a structured completion log entry with:
 - model when present
 - streaming flag
 - effective timeout and timeout source
-- timeout origin for timeout-like failures: `openai_sdk_timeout`, `undici_connect_timeout`, `undici_headers_timeout`, `undici_body_timeout`, or `unknown_timeout`
-- top-level error name, code, and message for failed requests
+- timeout origin for timeout-like failures: `openai_sdk_timeout`, `anthropic_sdk_timeout`, `undici_connect_timeout`, `undici_headers_timeout`, `undici_body_timeout`, or `unknown_timeout`
+- top-level error name, code, and message for failed requests; timeout and transport failures use provider-agnostic messages (`Timeout while waiting for upstream response`, `Transport failure while contacting upstream API`)
 - sanitized error cause chain for failed requests when present
 - start time and duration
 - final result category and returned HTTP status
@@ -947,6 +949,266 @@ curl -X POST http://localhost:3002/embeddings \
   }
 }
 ```
+
+---
+
+## Anthropic (Claude) Endpoints
+
+The proxy also supports Anthropic Claude models via the `@anthropic-ai/sdk` package. These endpoints are completely separate from the OpenAI routes.
+
+### Configuration
+
+Add the Anthropic API key to your `.env` or `.env.local` file:
+
+```env
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+---
+
+### `POST /anthropic`
+
+**Anthropic Messages API endpoint** — Create a message using Claude models (non-streaming).
+
+#### Request Body (JSON)
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `security_key` | string | ✅ | Must match `SECURITY_KEY` env variable |
+| `anthropic_api_key` | string | ❌ | Override the default Anthropic API key |
+| `model` | string | ✅ | Model ID (e.g., `claude-sonnet-4-5-20250514`, `claude-opus-4-5-20250514`, `claude-haiku-4-5-20250514`) |
+| `max_tokens` | number | ✅ | Maximum number of tokens to generate |
+| `messages` | array | ✅ | Array of message objects (`role`: `user` or `assistant`) |
+| `system` | string/array | ❌ | System prompt |
+| `temperature` | number | ❌ | Sampling temperature (0-1) |
+| `top_p` | number | ❌ | Nucleus sampling (0-1) |
+| `top_k` | number | ❌ | Top-K sampling |
+| `stop_sequences` | array | ❌ | Custom stop sequences |
+| `tools` | array | ❌ | Tool definitions for function calling |
+| `tool_choice` | object | ❌ | How model should use tools (`auto`, `any`, `tool`) |
+| `output_config` | object | ❌ | Structured output configuration with JSON schema |
+| `metadata` | object | ❌ | Request metadata (e.g., `user_id`) |
+| `thinking` | object | ❌ | Extended thinking configuration |
+| `timeout` | number | ❌ | Proxy-specific request timeout in milliseconds |
+
+> **Note:** `stream: true` is not supported on this endpoint. Use `/anthropic/stream` instead.
+
+#### Example Request
+
+```bash
+curl -X POST http://localhost:3002/anthropic \
+  -H "Content-Type: application/json" \
+  -d '{
+    "security_key": "your-secret-key",
+    "model": "claude-sonnet-4-5-20250514",
+    "max_tokens": 1024,
+    "messages": [
+      {"role": "user", "content": "Explain quantum computing in simple terms."}
+    ]
+  }'
+```
+
+#### Example with System Prompt
+
+```bash
+curl -X POST http://localhost:3002/anthropic \
+  -H "Content-Type: application/json" \
+  -d '{
+    "security_key": "your-secret-key",
+    "model": "claude-sonnet-4-5-20250514",
+    "max_tokens": 1024,
+    "system": "You are a helpful coding assistant. Always provide code examples.",
+    "messages": [
+      {"role": "user", "content": "How do I read a file in Python?"}
+    ]
+  }'
+```
+
+#### Example with Vision (Image)
+
+```bash
+curl -X POST http://localhost:3002/anthropic \
+  -H "Content-Type: application/json" \
+  -d '{
+    "security_key": "your-secret-key",
+    "model": "claude-sonnet-4-5-20250514",
+    "max_tokens": 1024,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "image",
+            "source": {
+              "type": "base64",
+              "media_type": "image/png",
+              "data": "iVBORw0KGgoAAAANSUhEUg..."
+            }
+          },
+          { "type": "text", "text": "What is in this image?" }
+        ]
+      }
+    ]
+  }'
+```
+
+#### Example with Tool Use
+
+```bash
+curl -X POST http://localhost:3002/anthropic \
+  -H "Content-Type: application/json" \
+  -d '{
+    "security_key": "your-secret-key",
+    "model": "claude-sonnet-4-5-20250514",
+    "max_tokens": 1024,
+    "tools": [
+      {
+        "name": "get_weather",
+        "description": "Get current weather for a location",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "location": { "type": "string", "description": "City name" }
+          },
+          "required": ["location"]
+        }
+      }
+    ],
+    "messages": [
+      {"role": "user", "content": "What is the weather in San Francisco?"}
+    ]
+  }'
+```
+
+#### Example with Structured Output (JSON Schema)
+
+The proxy fully supports Anthropic's `output_config` for structured output. Pass `output_config` with a `format` object containing the JSON schema to get type-safe, validated responses:
+
+```bash
+curl -X POST http://localhost:3002/anthropic \
+  -H "Content-Type: application/json" \
+  -d '{
+    "security_key": "your-secret-key",
+    "model": "claude-sonnet-4-5-20250514",
+    "max_tokens": 1024,
+    "output_config": {
+      "format": {
+        "type": "json_schema",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" },
+            "age": { "type": "integer" },
+            "skills": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          },
+          "required": ["name", "age", "skills"]
+        }
+      }
+    },
+    "messages": [
+      {"role": "user", "content": "Extract info: John is 30 years old and knows Python, TypeScript, and Rust."}
+    ]
+  }'
+```
+
+The response `content` will contain a JSON object matching the schema:
+
+```json
+{
+  "id": "msg_01...",
+  "type": "message",
+  "role": "assistant",
+  "content": [
+    {
+      "type": "text",
+      "text": "{\"name\": \"John\", \"age\": 30, \"skills\": [\"Python\", \"TypeScript\", \"Rust\"]}"
+    }
+  ],
+  "stop_reason": "end_turn",
+  "usage": { "input_tokens": 40, "output_tokens": 35 }
+}
+```
+
+#### Example with Extended Thinking
+
+```bash
+curl -X POST http://localhost:3002/anthropic \
+  -H "Content-Type: application/json" \
+  -d '{
+    "security_key": "your-secret-key",
+    "model": "claude-sonnet-4-5-20250514",
+    "max_tokens": 16000,
+    "thinking": {
+      "type": "enabled",
+      "budget_tokens": 10000
+    },
+    "messages": [
+      {"role": "user", "content": "Solve this complex math problem: ..."}
+    ]
+  }'
+```
+
+#### Response
+
+Standard Anthropic Messages API response:
+
+```json
+{
+  "id": "msg_01XFDUDYJgAACzvnptvVoYEL",
+  "type": "message",
+  "role": "assistant",
+  "content": [
+    {
+      "type": "text",
+      "text": "Quantum computing is..."
+    }
+  ],
+  "model": "claude-sonnet-4-5-20250514",
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 25,
+    "output_tokens": 150
+  }
+}
+```
+
+---
+
+### `POST /anthropic/stream`
+
+**Streaming Anthropic Messages API endpoint** — Create a message with Server-Sent Events streaming.
+
+Takes the same request body as `POST /anthropic` (the `stream` field is ignored since this endpoint always streams).
+
+#### Example Request
+
+```bash
+curl -X POST http://localhost:3002/anthropic/stream \
+  -H "Content-Type: application/json" \
+  -d '{
+    "security_key": "your-secret-key",
+    "model": "claude-sonnet-4-5-20250514",
+    "max_tokens": 1024,
+    "messages": [
+      {"role": "user", "content": "Write a short poem about coding."}
+    ]
+  }'
+```
+
+#### Streaming Events
+
+The stream emits Anthropic SSE events:
+
+- `message_start` — Contains the initial `Message` object with metadata
+- `content_block_start` — Start of a content block (text, tool_use, thinking)
+- `content_block_delta` — Incremental content (`text_delta`, `input_json_delta`, `thinking_delta`)
+- `content_block_stop` — End of a content block
+- `message_delta` — Final message metadata (stop_reason, usage)
+- `message_stop` — End of the message
 
 ---
 
