@@ -1,6 +1,7 @@
 import http from "http";
 import { randomUUID } from "crypto";
 import OpenAI from "openai";
+import Anthropic from "@anthropic-ai/sdk";
 import { Agent, fetch as undiciFetch } from "undici";
 
 import { logErrorEvent, logInfoEvent, sanitizeForLog } from "./proxyLogging.js";
@@ -32,6 +33,7 @@ export type RequestSafety = "create" | "safe";
 
 export type TimeoutOrigin =
   | "openai_sdk_timeout"
+  | "anthropic_sdk_timeout"
   | "undici_connect_timeout"
   | "undici_headers_timeout"
   | "undici_body_timeout"
@@ -195,6 +197,8 @@ export const proxyEndpointRetryPolicies = {
   "/openai2/:response_id/input_items": retryPolicies.safeIdempotent,
   "/openai2/:response_id/cancel": retryPolicies.unsafeCreate,
   "/embeddings": retryPolicies.unsafeCreate,
+  "/anthropic": retryPolicies.unsafeCreate,
+  "/anthropic/stream": retryPolicies.unsafeCreate,
 } as const satisfies Record<string, RequestRetryPolicy>;
 
 export function buildRuntimeDiagnosticsSnapshot(
@@ -1024,6 +1028,7 @@ export type ClassifiedProxyError = {
 function isAbortLikeError(error: unknown): boolean {
   return (
     error instanceof OpenAI.APIUserAbortError ||
+    error instanceof Anthropic.APIUserAbortError ||
     (error instanceof Error && error.name === "AbortError") ||
     getErrorCode(error) === "ABORT_ERR"
   );
@@ -1081,6 +1086,10 @@ function resolveTimeoutOrigin(
     return "openai_sdk_timeout";
   }
 
+  if (error instanceof Anthropic.APIConnectionTimeoutError) {
+    return "anthropic_sdk_timeout";
+  }
+
   return inferTimeoutOrigin(
     error,
     context,
@@ -1129,13 +1138,14 @@ export function classifyProxyError(
   if (
     context.capturedFailure?.category === "timeout" ||
     error instanceof OpenAI.APIConnectionTimeoutError ||
+    error instanceof Anthropic.APIConnectionTimeoutError ||
     isTimeoutLikeTransportError(error)
   ) {
     return {
       status: 504,
       type: "upstream_timeout",
       code: "OPENAI_PROXY_TIMEOUT",
-      message: "Timeout while waiting for OpenAI response",
+      message: "Timeout while waiting for upstream response",
       timeoutOrigin: resolveTimeoutOrigin(error, context),
       suppressResponse: false,
     };
@@ -1144,13 +1154,14 @@ export function classifyProxyError(
   if (
     context.capturedFailure?.category === "transport" ||
     error instanceof OpenAI.APIConnectionError ||
+    error instanceof Anthropic.APIConnectionError ||
     isTransportLikeError(error)
   ) {
     return {
       status: 502,
       type: "upstream_transport",
       code: "OPENAI_PROXY_TRANSPORT",
-      message: "Transport failure while contacting OpenAI",
+      message: "Transport failure while contacting upstream API",
       suppressResponse: false,
     };
   }
@@ -1166,6 +1177,22 @@ export function classifyProxyError(
         requestId: error.requestID ?? context.openaiRequestId ?? null,
         type: error.type ?? null,
         code: error.code ?? null,
+      },
+      suppressResponse: false,
+    };
+  }
+
+  if (error instanceof Anthropic.APIError) {
+    return {
+      status: error.status ?? 500,
+      type: "upstream_api_error",
+      code: "OPENAI_PROXY_UPSTREAM_API_ERROR",
+      message: error.message,
+      upstream: {
+        status: error.status,
+        requestId: error.requestID ?? null,
+        type: error.type ?? null,
+        code: null,
       },
       suppressResponse: false,
     };

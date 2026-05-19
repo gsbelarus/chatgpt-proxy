@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 
 import OpenAI from "openai";
+import Anthropic from "@anthropic-ai/sdk";
 
 import {
   badRequestError,
@@ -213,6 +214,58 @@ test("classifyProxyError maps transport failures to 502", () => {
   (transportError as Error & { code?: string }).code = "ECONNRESET";
 
   const classified = classifyProxyError(transportError, context);
+
+  assert.equal(classified.status, 502);
+  assert.equal(classified.type, "upstream_transport");
+  context.cleanup();
+});
+
+test("classifyProxyError preserves Anthropic upstream API status codes", () => {
+  const context = createRequestContext(
+    new MockRequest() as unknown as any,
+    new MockResponse() as unknown as any,
+    { endpoint: "/anthropic", method: "POST" },
+  );
+  const error = new Anthropic.RateLimitError(
+    429,
+    { type: "error", error: { type: "rate_limit_error", message: "Rate limited" } },
+    "Rate limited",
+    new Headers(),
+  );
+
+  const classified = classifyProxyError(error, context);
+
+  assert.equal(classified.status, 429);
+  assert.equal(classified.type, "upstream_api_error");
+  assert.equal(classified.upstream?.status, 429);
+  context.cleanup();
+});
+
+test("classifyProxyError maps Anthropic timeout errors to 504", () => {
+  const context = createRequestContext(
+    new MockRequest() as unknown as any,
+    new MockResponse() as unknown as any,
+    { endpoint: "/anthropic", method: "POST" },
+  );
+  const error = new Anthropic.APIConnectionTimeoutError();
+
+  const classified = classifyProxyError(error, context);
+
+  assert.equal(classified.status, 504);
+  assert.equal(classified.type, "upstream_timeout");
+  assert.equal(classified.timeoutOrigin, "anthropic_sdk_timeout");
+  context.cleanup();
+});
+
+test("classifyProxyError maps Anthropic connection errors to 502", () => {
+  const context = createRequestContext(
+    new MockRequest() as unknown as any,
+    new MockResponse() as unknown as any,
+    { endpoint: "/anthropic", method: "POST" },
+  );
+  const error = new Anthropic.APIConnectionError({ message: "Connection failed" });
+
+  const classified = classifyProxyError(error, context);
 
   assert.equal(classified.status, 502);
   assert.equal(classified.type, "upstream_transport");

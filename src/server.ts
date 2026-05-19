@@ -1,6 +1,7 @@
 import http from "http";
 import { config } from "dotenv";
 import OpenAI, { toFile } from "openai";
+import Anthropic from "@anthropic-ai/sdk";
 import Busboy from "busboy";
 import { AudioResponseFormat } from "openai/resources";
 import type { ChatCompletionCreateParamsNonStreaming } from "openai/resources/chat/completions";
@@ -8,6 +9,10 @@ import type {
   ResponseCreateParamsNonStreaming,
   ResponseIncludable,
 } from "openai/resources/responses/responses";
+import type {
+  MessageCreateParamsNonStreaming,
+  MessageCreateParamsStreaming,
+} from "@anthropic-ai/sdk/resources/messages";
 
 import {
   badRequestError,
@@ -264,6 +269,33 @@ function usageFromResponsesApi(response: ResponseUsageLike): UsageMetrics {
     promptTokens: response.usage?.input_tokens ?? 0,
     cachedTokens: response.usage?.input_tokens_details?.cached_tokens ?? 0,
     completionTokens: response.usage?.output_tokens ?? 0,
+  };
+}
+
+type AnthropicAuthOverrides = {
+  anthropic_api_key?: string;
+};
+
+function createAnthropicClient(
+  auth: AnthropicAuthOverrides,
+): Anthropic {
+  return new Anthropic({
+    apiKey: auth.anthropic_api_key || (process.env.ANTHROPIC_API_KEY as string),
+    maxRetries: 0,
+  });
+}
+
+function usageFromAnthropic(message: {
+  usage?: {
+    input_tokens?: number | null;
+    cache_read_input_tokens?: number | null;
+    output_tokens?: number | null;
+  } | null;
+}): UsageMetrics {
+  return {
+    promptTokens: message.usage?.input_tokens ?? 0,
+    cachedTokens: message.usage?.cache_read_input_tokens ?? 0,
+    completionTokens: message.usage?.output_tokens ?? 0,
   };
 }
 
@@ -1039,6 +1071,147 @@ async function handleResponsesDelete(
   }
 }
 
+async function handleAnthropicMessages(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): Promise<void> {
+  const context = createRequestContext(req, res, {
+    endpoint: "/anthropic",
+    method: req.method ?? "POST",
+  });
+  let lease: ConcurrencyLease | undefined;
+
+  try {
+    const data = await readJsonBody(req);
+    const {
+      security_key,
+      anthropic_api_key,
+      timeout,
+      stream,
+      ...messagesPayload
+    } = data;
+
+    ensureSecurityKey(security_key);
+
+    if (stream) {
+      throw badRequestError(
+        "Streaming is not supported on this endpoint. Use /anthropic/stream instead.",
+      );
+    }
+
+    context.model = getString(messagesPayload.model);
+
+    const requestOptions = buildOpenAIRequestOptions(
+      context,
+      timeout,
+      proxyEndpointRetryPolicies["/anthropic"],
+    );
+    const anthropic = createAnthropicClient({
+      anthropic_api_key: getString(anthropic_api_key),
+    });
+
+    lease = acquireLease();
+
+    const message = await anthropic.messages.create(
+      messagesPayload as unknown as MessageCreateParamsNonStreaming,
+      {
+        timeout: requestOptions.timeout,
+        signal: requestOptions.signal,
+      },
+    );
+
+    sendJson(res, 200, message);
+    finalizeSuccessfulRequest(context, 200, usageFromAnthropic(message));
+  } catch (error: unknown) {
+    handleRequestError(context, res, error);
+  } finally {
+    lease?.release();
+    context.cleanup();
+  }
+}
+
+async function handleAnthropicMessagesStream(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): Promise<void> {
+  const context = createRequestContext(req, res, {
+    endpoint: "/anthropic/stream",
+    method: req.method ?? "POST",
+    stream: true,
+  });
+  let lease: ConcurrencyLease | undefined;
+
+  try {
+    const data = await readJsonBody(req);
+    const {
+      security_key,
+      anthropic_api_key,
+      timeout,
+      stream: _stream,
+      ...messagesPayload
+    } = data;
+
+    ensureSecurityKey(security_key);
+
+    context.model = getString(messagesPayload.model);
+
+    const requestOptions = buildOpenAIRequestOptions(
+      context,
+      timeout,
+      proxyEndpointRetryPolicies["/anthropic/stream"],
+    );
+    const anthropic = createAnthropicClient({
+      anthropic_api_key: getString(anthropic_api_key),
+    });
+
+    lease = acquireLease();
+
+    if (!sendSseHeaders(res)) {
+      return;
+    }
+
+    const messageStream = anthropic.messages.stream(
+      messagesPayload as unknown as MessageCreateParamsStreaming,
+      {
+        timeout: requestOptions.timeout,
+        signal: requestOptions.signal,
+      },
+    );
+
+    context.addAbortHandler(() => {
+      messageStream.abort();
+    });
+
+    const onStreamEvent = (event: unknown) => {
+      if (!context.clientDisconnected) {
+        writeSseEvent(res, event);
+      }
+    };
+
+    messageStream.on("streamEvent", onStreamEvent);
+
+    try {
+      const finalMessage = await messageStream.finalMessage();
+
+      if (!context.clientDisconnected) {
+        endSse(res);
+        finalizeSuccessfulRequest(
+          context,
+          200,
+          usageFromAnthropic(finalMessage),
+        );
+      }
+    } finally {
+      messageStream.off("streamEvent", onStreamEvent);
+    }
+  } catch (error: unknown) {
+    handleRequestError(context, res, error);
+  } finally {
+    lease?.release();
+    context.cleanup();
+  }
+}
+
 async function handleEmbeddings(
   req: http.IncomingMessage,
   res: http.ServerResponse,
@@ -1324,6 +1497,16 @@ export const server = http.createServer(async (req, res) => {
 
   if (pathname.startsWith("/openai2/") && req.method === "GET") {
     await handleResponsesRetrieve(req, res, urlObj, pathname);
+    return;
+  }
+
+  if (pathname === "/anthropic" && req.method === "POST") {
+    await handleAnthropicMessages(req, res);
+    return;
+  }
+
+  if (pathname === "/anthropic/stream" && req.method === "POST") {
+    await handleAnthropicMessagesStream(req, res);
     return;
   }
 
