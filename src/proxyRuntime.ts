@@ -328,7 +328,7 @@ export type ConcurrencyLease = {
 export class ConcurrencyLimiter {
   private current = 0;
 
-  constructor(private readonly maxParallelRequests: number) { }
+  constructor(private readonly maxParallelRequests: number) {}
 
   tryAcquire(): ConcurrencyLease | null {
     if (this.current >= this.maxParallelRequests) {

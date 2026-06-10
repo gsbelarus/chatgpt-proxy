@@ -75,6 +75,12 @@ npm run start
 
 The server starts on **http://localhost:3002** by default.
 
+## Vision Notes
+
+- Local validation confirmed image-capable requests through `/openai` and `/openai2` when the image is sent inline (`image.base64` for `/openai`, or a `data:` URL in `input_image.image_url` for `/openai2`).
+- Externally hosted image URLs are forwarded unchanged and may still be rejected by the upstream model provider. In local testing, a Wikimedia image URL failed upstream with `invalid_image_url`.
+- Anthropic vision requests require a valid `ANTHROPIC_API_KEY` or per-request `anthropic_api_key`. Without Anthropic auth, the request does not reach Claude.
+
 ---
 
 ## API Endpoints
@@ -155,10 +161,12 @@ curl -X POST http://localhost:3002/openai \
       {"role": "user", "content": "What is in this image?"}
     ],
     "image": {
-      "url": "https://upload.wikimedia.org/wikipedia/commons/thumb/a/a7/Camponotus_flavomarginatus_ant.jpg/800px-Camponotus_flavomarginatus_ant.jpg"
+      "base64": "iVBORw0KGgoAAAANSUhEUg..."
     }
   }'
 ```
+
+Use inline `base64` image data when you need the most reliable path through `/openai`. Remote image URLs are passed through unchanged and can still fail upstream.
 
 #### Response
 
@@ -511,10 +519,12 @@ curl -X POST http://localhost:3002/openai2 \
     "model": "gpt-4o",
     "input": [
       { "type": "input_text", "text": "What is in this image?" },
-      { "type": "input_image", "image_url": "https://example.com/image.png" }
+      { "type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg..." }
     ]
   }'
 ```
+
+Local validation confirmed `/openai2` with inline `data:` image URLs.
 
 #### Example: Multi-turn Conversation
 
@@ -963,6 +973,8 @@ Add the Anthropic API key to your `.env` or `.env.local` file:
 ```env
 ANTHROPIC_API_KEY=sk-ant-...
 ```
+
+If you do not configure Anthropic auth, `/anthropic` requests fail before they reach Claude.
 
 ---
 

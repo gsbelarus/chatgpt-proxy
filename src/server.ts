@@ -276,9 +276,7 @@ type AnthropicAuthOverrides = {
   anthropic_api_key?: string;
 };
 
-function createAnthropicClient(
-  auth: AnthropicAuthOverrides,
-): Anthropic {
+function createAnthropicClient(auth: AnthropicAuthOverrides): Anthropic {
   return new Anthropic({
     apiKey: auth.anthropic_api_key || (process.env.ANTHROPIC_API_KEY as string),
     maxRetries: 0,
@@ -407,9 +405,9 @@ async function handleOpenAIChatCompletion(
         ? { type: "image_url", image_url: { url: imageUrl } }
         : imageBase64
           ? {
-            type: "image_url",
-            image_url: { url: `data:image/png;base64,${imageBase64}` },
-          }
+              type: "image_url",
+              image_url: { url: `data:image/png;base64,${imageBase64}` },
+            }
           : null;
 
       if (!imagePart) {
@@ -848,7 +846,7 @@ async function handleResponsesInputItems(
         limit: parseNumber(urlObj.searchParams.get("limit")),
         order:
           urlObj.searchParams.get("order") === "asc" ||
-            urlObj.searchParams.get("order") === "desc"
+          urlObj.searchParams.get("order") === "desc"
             ? (urlObj.searchParams.get("order") as "asc" | "desc")
             : undefined,
       },
