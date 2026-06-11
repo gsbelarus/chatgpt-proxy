@@ -31,8 +31,10 @@ import {
   proxyConfig,
   sendJson,
   sendSseHeaders,
+  startSseKeepAlive,
   writeSseEvent,
   type ConcurrencyLease,
+  type SseKeepAlive,
   type UsageMetrics,
 } from "./proxyRuntime.js";
 import { errors, infos, logErrorEvent, logInfoEvent } from "./proxyLogging.js";
@@ -591,6 +593,7 @@ async function handleResponsesCreate(
     method: req.method ?? "POST",
   });
   let lease: ConcurrencyLease | undefined;
+  let keepAlive: SseKeepAlive | undefined;
 
   try {
     const data = await readJsonBody(req);
@@ -630,12 +633,15 @@ async function handleResponsesCreate(
         return;
       }
 
+      keepAlive = startSseKeepAlive(res);
+
       const responseStream = openai.responses.stream(
         responsesPayload as unknown as ResponseStreamPayload,
         requestOptions,
       );
       const onEvent = (event: unknown) => {
         if (!context.clientDisconnected) {
+          keepAlive?.touch();
           writeSseEvent(res, event);
         }
       };
@@ -674,6 +680,7 @@ async function handleResponsesCreate(
   } catch (error: unknown) {
     handleRequestError(context, res, error);
   } finally {
+    keepAlive?.stop();
     lease?.release();
     context.cleanup();
   }
@@ -876,6 +883,7 @@ async function handleResponsesRetrieve(
     stream,
   });
   let lease: ConcurrencyLease | undefined;
+  let keepAlive: SseKeepAlive | undefined;
 
   try {
     ensureSecurityKey(urlObj.searchParams.get("security_key") || "");
@@ -923,6 +931,8 @@ async function handleResponsesRetrieve(
         return;
       }
 
+      keepAlive = startSseKeepAlive(res);
+
       const responseStream = await openai.responses.retrieve(
         responseId,
         { ...retrieveParams, stream: true },
@@ -934,6 +944,8 @@ async function handleResponsesRetrieve(
       });
 
       for await (const event of responseStream) {
+        keepAlive.touch();
+
         if (!writeSseEvent(res, event)) {
           break;
         }
@@ -958,6 +970,7 @@ async function handleResponsesRetrieve(
   } catch (error: unknown) {
     handleRequestError(context, res, error);
   } finally {
+    keepAlive?.stop();
     lease?.release();
     context.cleanup();
   }

@@ -17,6 +17,7 @@ import {
   proxyEndpointRetryPolicies,
   proxyConfig,
   resolveUpstreamTimeoutConfig,
+  startSseKeepAlive,
 } from "../src/proxyRuntime.js";
 import { errors, infos, sanitizeForLog } from "../src/proxyLogging.js";
 
@@ -416,6 +417,40 @@ test("client disconnect handling aborts upstream work", () => {
   assert.equal(context.clientDisconnected, true);
   assert.equal(aborted, true);
   context.cleanup();
+});
+
+test("startSseKeepAlive writes comment lines only during upstream silence", (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+
+  const res = new MockResponse();
+  const keepAlive = startSseKeepAlive(res as unknown as any);
+  const interval = proxyConfig.sseKeepAliveIntervalMs;
+
+  t.mock.timers.tick(interval);
+  assert.equal(res.body, ": keep-alive\n\n");
+
+  keepAlive.touch();
+  t.mock.timers.tick(interval);
+  assert.equal(res.body, ": keep-alive\n\n");
+
+  t.mock.timers.tick(interval);
+  assert.equal(res.body, ": keep-alive\n\n: keep-alive\n\n");
+
+  keepAlive.stop();
+  t.mock.timers.tick(interval * 3);
+  assert.equal(res.body, ": keep-alive\n\n: keep-alive\n\n");
+});
+
+test("startSseKeepAlive stops writing once the response has ended", (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+
+  const res = new MockResponse();
+  startSseKeepAlive(res as unknown as any);
+
+  res.end();
+  t.mock.timers.tick(proxyConfig.sseKeepAliveIntervalMs * 2);
+
+  assert.equal(res.body, "");
 });
 
 test("sanitizeForLog redacts keys and bearer tokens", () => {

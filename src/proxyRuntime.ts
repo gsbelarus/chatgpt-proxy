@@ -14,6 +14,7 @@ const DEFAULT_OVERLOAD_RETRY_AFTER_SECONDS = 1;
 const DEFAULT_OPENAI_SAFE_RETRIES = 2;
 const DEFAULT_TRANSPORT_CONNECT_TIMEOUT_MS = 30_000;
 const DEFAULT_TRANSPORT_TIMEOUT_GRACE_MS = 5_000;
+const DEFAULT_SSE_KEEP_ALIVE_INTERVAL_MS = 15_000;
 const REQUEST_ID_HEADER_NAME = "x-request-id";
 const PROXY_REQUEST_ID_RESPONSE_HEADER = "X-Proxy-Request-Id";
 const INCOMING_REQUEST_ID_RESPONSE_HEADER = "X-Incoming-Request-Id";
@@ -84,6 +85,7 @@ export type RuntimeDiagnosticsSnapshot = {
     serverSocketTimeoutMs: number;
     serverKeepAliveTimeoutMs: number;
     serverHeadersTimeoutMs: number;
+    sseKeepAliveIntervalMs: number;
   };
   limits: {
     maxParallelRequests: number;
@@ -170,6 +172,9 @@ export const proxyConfig = {
     DEFAULT_MAX_PARALLEL_REQUESTS,
   overloadRetryAfterSeconds: DEFAULT_OVERLOAD_RETRY_AFTER_SECONDS,
   incomingRequestIdHeader: REQUEST_ID_HEADER_NAME,
+  sseKeepAliveIntervalMs:
+    parsePositiveInteger(process.env.OPENAI_PROXY_SSE_KEEPALIVE_INTERVAL_MS) ??
+    DEFAULT_SSE_KEEP_ALIVE_INTERVAL_MS,
 } as const;
 
 export const retryPolicies = {
@@ -223,6 +228,7 @@ export function buildRuntimeDiagnosticsSnapshot(
       serverSocketTimeoutMs: server.timeout,
       serverKeepAliveTimeoutMs: server.keepAliveTimeout,
       serverHeadersTimeoutMs: server.headersTimeout,
+      sseKeepAliveIntervalMs: proxyConfig.sseKeepAliveIntervalMs,
     },
     limits: {
       maxParallelRequests: proxyConfig.maxParallelRequests,
@@ -1272,6 +1278,43 @@ export function writeSseEvent(
 
   res.write(`data: ${JSON.stringify(payload)}\n\n`);
   return !res.destroyed;
+}
+
+export type SseKeepAlive = {
+  touch: () => void;
+  stop: () => void;
+};
+
+// Writes an SSE comment line every interval while no upstream event has been
+// forwarded, so middle hops with read timeouts do not kill the stream during
+// long silent reasoning phases. Comment lines are ignored by SSE parsers.
+export function startSseKeepAlive(res: http.ServerResponse): SseKeepAlive {
+  let eventForwardedSinceLastTick = false;
+
+  const timer = setInterval(() => {
+    if (res.writableEnded || res.destroyed) {
+      clearInterval(timer);
+      return;
+    }
+
+    if (eventForwardedSinceLastTick) {
+      eventForwardedSinceLastTick = false;
+      return;
+    }
+
+    res.write(": keep-alive\n\n");
+  }, proxyConfig.sseKeepAliveIntervalMs);
+
+  timer.unref();
+
+  return {
+    touch: () => {
+      eventForwardedSinceLastTick = true;
+    },
+    stop: () => {
+      clearInterval(timer);
+    },
+  };
 }
 
 export function endSse(res: http.ServerResponse): void {

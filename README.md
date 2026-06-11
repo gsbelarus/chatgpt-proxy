@@ -37,6 +37,7 @@ OPENAI_PROXY_TRANSPORT_CONNECT_TIMEOUT_MS=30000
 OPENAI_PROXY_TRANSPORT_HEADERS_TIMEOUT_MS=905000
 OPENAI_PROXY_TRANSPORT_BODY_TIMEOUT_MS=905000
 OPENAI_PROXY_MAX_PARALLEL_REQUESTS=32
+OPENAI_PROXY_SSE_KEEPALIVE_INTERVAL_MS=15000
 ```
 
 ### Reliability Controls
@@ -47,8 +48,11 @@ OPENAI_PROXY_MAX_PARALLEL_REQUESTS=32
 - `OPENAI_PROXY_TRANSPORT_HEADERS_TIMEOUT_MS` sets the explicit undici response-headers timeout for outbound OpenAI requests.
 - `OPENAI_PROXY_TRANSPORT_BODY_TIMEOUT_MS` sets the explicit undici response-body idle timeout for outbound OpenAI requests.
 - `OPENAI_PROXY_MAX_PARALLEL_REQUESTS` bounds concurrent OpenAI work inside the proxy. When the limit is reached, the proxy rejects new upstream work with `503` and `Retry-After: 1`.
+- `OPENAI_PROXY_SSE_KEEPALIVE_INTERVAL_MS` sets the SSE keep-alive interval for `/openai2` streaming responses. While a stream is open and no upstream event has been forwarded during an interval, the proxy writes an SSE comment line (`: keep-alive`) so intermediary read timeouts do not kill the stream during long silent reasoning phases. Comment lines are ignored by standards-compliant SSE parsers.
 
 By default, the transport `headersTimeout` and `bodyTimeout` are set above the proxy's maximum upstream timeout so undici does not terminate long-running `/openai2` calls earlier than the configured OpenAI SDK budget unless an operator explicitly chooses a lower transport timeout.
+
+If a reverse proxy (nginx, etc.) sits in front of this service, it must pass `text/event-stream` responses through unbuffered and its read timeout must be above the keep-alive interval.
 
 Default values:
 
@@ -58,6 +62,7 @@ Default values:
 - transport headers timeout: `OPENAI_PROXY_UPSTREAM_MAX_TIMEOUT_MS + 5000`
 - transport body timeout: `OPENAI_PROXY_UPSTREAM_MAX_TIMEOUT_MS + 5000`
 - maximum parallel requests: `32`
+- SSE keep-alive interval: `15000` ms
 
 ## Running
 
