@@ -32,6 +32,7 @@ import {
   sendJson,
   sendSseHeaders,
   startSseKeepAlive,
+  unauthorizedError,
   writeSseEvent,
   type ConcurrencyLease,
   type SseKeepAlive,
@@ -197,6 +198,35 @@ function ensureSecurityKey(securityKey: unknown): void {
   if (securityKey !== process.env.SECURITY_KEY) {
     throw forbiddenError();
   }
+}
+
+function readHeaderValue(
+  headerValue: string | string[] | undefined,
+): string | undefined {
+  if (Array.isArray(headerValue)) {
+    const value = headerValue.find(
+      (candidate) => typeof candidate === "string" && candidate.trim() !== "",
+    );
+
+    return value?.trim();
+  }
+
+  if (typeof headerValue === "string" && headerValue.trim() !== "") {
+    return headerValue.trim();
+  }
+
+  return undefined;
+}
+
+function parseBearerToken(headerValue: string | undefined): string | undefined {
+  if (headerValue === undefined) {
+    return undefined;
+  }
+
+  const match = /^Bearer\s+(.+)$/i.exec(headerValue);
+  const token = match?.[1]?.trim();
+
+  return token && token.length > 0 ? token : undefined;
 }
 
 function parseBoolean(value: string | null): boolean | undefined {
@@ -452,6 +482,81 @@ async function handleOpenAIChatCompletion(
       200,
       usageFromChatCompletion(chatCompletion),
     );
+  } catch (error: unknown) {
+    handleRequestError(context, res, error);
+  } finally {
+    lease?.release();
+    context.cleanup();
+  }
+}
+
+async function handleOpenAICompatibleChatCompletion(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): Promise<void> {
+  const context = createRequestContext(req, res, {
+    endpoint: "/v1/chat/completions",
+    method: req.method ?? "POST",
+  });
+  let lease: ConcurrencyLease | undefined;
+
+  try {
+    const securityKey = readHeaderValue(req.headers["x-security-key"]);
+
+    if (securityKey === undefined) {
+      throw unauthorizedError("Missing X-Security-Key header");
+    }
+
+    if (securityKey !== process.env.SECURITY_KEY) {
+      throw unauthorizedError("Invalid X-Security-Key header");
+    }
+
+    const openaiApiKey = parseBearerToken(
+      readHeaderValue(req.headers["authorization"]),
+    );
+
+    if (openaiApiKey === undefined) {
+      throw unauthorizedError(
+        "Missing or malformed Authorization header. Expected 'Authorization: Bearer <api_key>'",
+      );
+    }
+
+    const project = readHeaderValue(req.headers["x-project"]);
+    const data = await readJsonBody(req);
+
+    if (data.stream) {
+      throw badRequestError("Streaming is not supported on this endpoint");
+    }
+
+    context.model = getString(data.model);
+
+    const requestOptions = buildOpenAIRequestOptions(
+      context,
+      undefined,
+      proxyEndpointRetryPolicies["/v1/chat/completions"],
+    );
+    const openai = createOpenAIClient(
+      {
+        openai_api_key: openaiApiKey,
+        project,
+      },
+      context,
+    );
+
+    lease = acquireLease();
+
+    const chatCompletion = await openai.chat.completions.create(
+      data as unknown as ChatCompletionCreateParamsNonStreaming,
+      requestOptions,
+    );
+
+    const usage = usageFromChatCompletion(chatCompletion);
+
+    sendJson(res, 200, chatCompletion);
+    finalizeSuccessfulRequest(context, 200, usage, {
+      ...(project ? { project } : {}),
+      usage,
+    });
   } catch (error: unknown) {
     handleRequestError(context, res, error);
   } finally {
@@ -1411,6 +1516,11 @@ export const server = http.createServer(async (req, res) => {
 
   if (pathname === "/openai" && req.method === "POST") {
     await handleOpenAIChatCompletion(req, res);
+    return;
+  }
+
+  if (pathname === "/v1/chat/completions" && req.method === "POST") {
+    await handleOpenAICompatibleChatCompletion(req, res);
     return;
   }
 

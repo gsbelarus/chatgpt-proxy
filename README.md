@@ -6,6 +6,7 @@ A lightweight HTTP proxy server for OpenAI and Anthropic APIs. It wraps the offi
 
 - **Responses API** — OpenAI's most advanced interface with tools, web search, file search, MCP, function calling, and streaming
 - **Chat Completions** — Full OpenAI Chat Completions API support including vision (images)
+- **OpenAI-compatible endpoint** — `POST /v1/chat/completions` with header-based auth for standard OpenAI SDKs and Spring AI (just override the base URL)
 - **Anthropic Claude** — Anthropic Messages API with streaming, vision, tool use, and extended thinking
 - **Audio Transcriptions** — Whisper-based speech-to-text
 - **Embeddings** — Generate text embeddings
@@ -200,6 +201,116 @@ Standard OpenAI Chat Completion response:
   }
 }
 ```
+
+---
+
+### `POST /v1/chat/completions`
+
+**OpenAI-compatible Chat Completions endpoint** — a drop-in target for standard OpenAI SDKs and Spring AI (`spring-ai-openai`). Unlike `/openai`, the authentication parameters are passed via **HTTP headers** (not in the body), so a client only needs to override its base URL and add two headers — no custom adapter code.
+
+Proxies requests to `POST https://api.openai.com/v1/chat/completions`. The request body is forwarded to OpenAI as-is, and the OpenAI response is returned unchanged (same status code, same body).
+
+#### Headers
+
+| Header | Required | Description |
+|--------|----------|-------------|
+| `Authorization: Bearer <openai_api_key>` | ✅ | OpenAI API key |
+| `X-Security-Key: <security_key>` | ✅ | Must match the `SECURITY_KEY` env variable |
+| `X-Project: <project>` | ❌ | OpenAI project ID (forwarded as `OpenAI-Project`) |
+
+#### Request Body (JSON)
+
+Standard OpenAI Chat Completions body (`model`, `messages`, `response_format`, `temperature`, etc.). The body must **not** contain `security_key` / `openai_api_key`. `response_format: { "type": "json_schema", ... }` (structured output) is forwarded and works as usual.
+
+> **Note:** `stream: true` is not supported on this endpoint and returns `400 { "error": { "message": "Streaming is not supported on this endpoint" } }`.
+
+#### Errors
+
+Errors are returned as OpenAI-compatible error objects (`{ "error": { "message", "type", "code" } }`):
+
+- Missing/invalid `X-Security-Key` → `401`
+- Missing/malformed `Authorization` → `401`
+- Upstream OpenAI errors → the upstream status code is forwarded
+- Upstream timeout → `504`; network/transport failure → `502`
+
+#### Example Request
+
+```bash
+curl -X POST http://localhost:3002/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -H "X-Security-Key: your-secret-key" \
+  -H "X-Project: proj_123" \
+  -d '{
+    "model": "gpt-4o",
+    "messages": [
+      {"role": "user", "content": "What is TypeScript?"}
+    ]
+  }'
+```
+
+#### Spring AI Configuration
+
+Point the Spring AI OpenAI client at the proxy via `base-url` and add the proxy headers:
+
+```yaml
+spring:
+  ai:
+    openai:
+      base-url: https://<proxy-host>
+      api-key: ${OPENAI_API_KEY}
+      chat:
+        options:
+          model: gpt-4o
+```
+
+```java
+OpenAiChatOptions.builder()
+    .httpHeaders(Map.of("X-Security-Key", key, "X-Project", project))
+    .build();
+```
+
+> Spring AI appends `/v1/chat/completions` to the configured `base-url`, so set `base-url` to the proxy origin (e.g. `https://proxy.example.com`) without a trailing path.
+
+#### OpenAI SDK Configuration
+
+Any standard OpenAI SDK works too — point `base_url` / `baseURL` at the proxy's `/v1` and add the `X-Security-Key` header (streaming excluded).
+
+Python (`openai`):
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="https://<proxy-host>/v1",
+    api_key="<openai_api_key>",  # sent as Authorization: Bearer ...
+    default_headers={"X-Security-Key": "your-secret-key", "X-Project": "proj_123"},
+)
+
+completion = client.chat.completions.create(
+    model="gpt-4o",
+    messages=[{"role": "user", "content": "What is TypeScript?"}],
+)
+```
+
+Node (`openai`):
+
+```ts
+import OpenAI from "openai";
+
+const client = new OpenAI({
+  baseURL: "https://<proxy-host>/v1",
+  apiKey: "<openai_api_key>", // sent as Authorization: Bearer ...
+  defaultHeaders: { "X-Security-Key": "your-secret-key", "X-Project": "proj_123" },
+});
+
+const completion = await client.chat.completions.create({
+  model: "gpt-4o",
+  messages: [{ role: "user", content: "What is TypeScript?" }],
+});
+```
+
+> OpenAI SDKs append `/chat/completions` to `base_url`, so include the `/v1` segment (e.g. `https://proxy.example.com/v1`). This lands on the same `/v1/chat/completions` route as the Spring AI configuration above.
 
 ---
 
