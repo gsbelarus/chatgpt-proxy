@@ -194,6 +194,7 @@ export const retryPolicies = {
 
 export const proxyEndpointRetryPolicies = {
   "/openai": retryPolicies.unsafeCreate,
+  "/v1/chat/completions": retryPolicies.unsafeCreate,
   "/openai/audio/transcriptions": retryPolicies.unsafeCreate,
   "/openai2": retryPolicies.unsafeCreate,
   "/openai2/compact": retryPolicies.unsafeCreate,
@@ -999,6 +1000,15 @@ export function forbiddenError(message = "Forbidden"): ProxyRequestError {
     403,
     "forbidden",
     "OPENAI_PROXY_FORBIDDEN",
+    message,
+  );
+}
+
+export function unauthorizedError(message = "Unauthorized"): ProxyRequestError {
+  return new ProxyRequestError(
+    401,
+    "forbidden",
+    "OPENAI_PROXY_UNAUTHORIZED",
     message,
   );
 }
