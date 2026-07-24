@@ -14,6 +14,7 @@
     "lint": "eslint src",
     "format": "npx prettier --write src",
     "format:check": "npx prettier --check src",
+    "probe:sse-cap": "tsx src/sseCapProbeCli.ts",
     "docker": "docker build -t gsbelarus/chatgpt-proxy . && docker push gsbelarus/chatgpt-proxy"
   },
   "keywords": [],

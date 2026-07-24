@@ -55,6 +55,31 @@ By default, the transport `headersTimeout` and `bodyTimeout` are set above the p
 
 If a reverse proxy (nginx, etc.) sits in front of this service, it must pass `text/event-stream` responses through unbuffered and its read timeout must be above the keep-alive interval.
 
+### SSE cap characterization probe
+
+`POST /openai2/diagnostics/sse-cap` is an authenticated, non-billable
+diagnostic endpoint for identifying whether the deployed proxy chain has an
+idle/read cap, a total-response cap, or SSE-comment buffering. It accepts the
+normal `security_key` plus one of three closed modes: `active-data`,
+`comment-heartbeat`, or `silent-control`. Probe duration is bounded to three
+minutes and the endpoint never calls a model provider.
+
+Run all three modes concurrently through the same deployed host used for
+`/openai2`:
+
+```bash
+SSE_CAP_PROBE_URL=https://proxy.example.invalid \
+SSE_CAP_PROBE_SECURITY_KEY=... \
+npm run probe:sse-cap
+```
+
+The command sends `Accept-Encoding: identity`, records bounded event-arrival
+timings and opaque request IDs, and prints one of
+`idle-cap-confirmed`, `total-response-cap-suspected`,
+`comment-buffering-suspected`, `cap-not-reproduced`, or `inconclusive`. It never
+prints the target URL or security key. Run it against the deployed ingress;
+running directly against localhost does not characterize intermediate hops.
+
 Default values:
 
 - default upstream timeout: `600000` ms

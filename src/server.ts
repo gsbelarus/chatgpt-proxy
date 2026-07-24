@@ -39,6 +39,11 @@ import {
   type UsageMetrics,
 } from "./proxyRuntime.js";
 import { errors, infos, logErrorEvent, logInfoEvent } from "./proxyLogging.js";
+import {
+  parseSseCapProbeOptions,
+  sendSseCapProbeHeaders,
+  startSseCapProbe,
+} from "./sseCapProbe.js";
 
 config({ path: [".env.local", ".env"] });
 
@@ -791,6 +796,57 @@ async function handleResponsesCreate(
   }
 }
 
+async function handleSseCapProbe(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): Promise<void> {
+  const context = createRequestContext(req, res, {
+    endpoint: "/openai2/diagnostics/sse-cap",
+    method: req.method ?? "POST",
+    stream: true,
+  });
+  let probe: ReturnType<typeof startSseCapProbe> | undefined;
+
+  try {
+    const data = await readJsonBody(req);
+    ensureSecurityKey(data.security_key);
+
+    let options;
+    try {
+      options = parseSseCapProbeOptions(data);
+    } catch (error: unknown) {
+      throw badRequestError(
+        error instanceof Error
+          ? error.message
+          : "Invalid SSE cap probe options",
+      );
+    }
+
+    if (!sendSseCapProbeHeaders(res, options)) {
+      return;
+    }
+
+    probe = startSseCapProbe(res, options);
+    context.addAbortHandler(probe.stop);
+
+    const result = await probe.completed;
+    if (result === "completed") {
+      logInfoEvent("proxy.sse_cap_probe.complete", {
+        requestId: context.requestId,
+        incomingRequestId: context.incomingRequestId,
+        mode: options.mode,
+        durationMs: options.durationMs,
+        intervalMs: options.intervalMs,
+      });
+    }
+  } catch (error: unknown) {
+    handleRequestError(context, res, error);
+  } finally {
+    probe?.stop();
+    context.cleanup();
+  }
+}
+
 async function handleResponsesCompact(
   req: http.IncomingMessage,
   res: http.ServerResponse,
@@ -1413,7 +1469,7 @@ export const server = http.createServer(async (req, res) => {
   );
   res.setHeader(
     "Access-Control-Expose-Headers",
-    "X-Proxy-Request-Id, X-Incoming-Request-Id, Retry-After",
+    "X-Proxy-Request-Id, X-Incoming-Request-Id, X-SSE-Cap-Probe-Version, X-SSE-Cap-Probe-Mode, Retry-After",
   );
 
   if (req.method === "OPTIONS") {
@@ -1580,6 +1636,11 @@ export const server = http.createServer(async (req, res) => {
 
   if (pathname === "/openai2" && req.method === "POST") {
     await handleResponsesCreate(req, res);
+    return;
+  }
+
+  if (pathname === "/openai2/diagnostics/sse-cap" && req.method === "POST") {
+    await handleSseCapProbe(req, res);
     return;
   }
 
