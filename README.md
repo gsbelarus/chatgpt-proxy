@@ -37,6 +37,8 @@ OPENAI_PROXY_UPSTREAM_MAX_TIMEOUT_MS=900000
 OPENAI_PROXY_TRANSPORT_CONNECT_TIMEOUT_MS=30000
 OPENAI_PROXY_TRANSPORT_HEADERS_TIMEOUT_MS=905000
 OPENAI_PROXY_TRANSPORT_BODY_TIMEOUT_MS=905000
+OPENAI_PROXY_SERVER_TIMEOUT_MS=935000
+OPENAI_PROXY_KEEPALIVE_TIMEOUT_MS=65000
 OPENAI_PROXY_MAX_PARALLEL_REQUESTS=32
 OPENAI_PROXY_SSE_KEEPALIVE_INTERVAL_MS=15000
 ```
@@ -48,10 +50,45 @@ OPENAI_PROXY_SSE_KEEPALIVE_INTERVAL_MS=15000
 - `OPENAI_PROXY_TRANSPORT_CONNECT_TIMEOUT_MS` sets the explicit undici connect timeout for outbound OpenAI requests.
 - `OPENAI_PROXY_TRANSPORT_HEADERS_TIMEOUT_MS` sets the explicit undici response-headers timeout for outbound OpenAI requests.
 - `OPENAI_PROXY_TRANSPORT_BODY_TIMEOUT_MS` sets the explicit undici response-body idle timeout for outbound OpenAI requests.
+- `OPENAI_PROXY_SERVER_TIMEOUT_MS` sets the inbound client socket timeout (`server.timeout`, `server.requestTimeout`). It defaults to 30s above the latest upstream deadline and is clamped up to that floor if an operator configures a lower value.
+- `OPENAI_PROXY_KEEPALIVE_TIMEOUT_MS` sets how long an **idle** connection is held for reuse between requests (`server.keepAliveTimeout`), default 65s. This is deliberately independent of the request socket timeout: raising the upstream budget must not also make the proxy hoard idle sockets for the same span.
 - `OPENAI_PROXY_MAX_PARALLEL_REQUESTS` bounds concurrent OpenAI work inside the proxy. When the limit is reached, the proxy rejects new upstream work with `503` and `Retry-After: 1`.
 - `OPENAI_PROXY_SSE_KEEPALIVE_INTERVAL_MS` sets the SSE keep-alive interval for `/openai2` streaming responses. While a stream is open and no upstream event has been forwarded during an interval, the proxy writes an SSE comment line (`: keep-alive`) so intermediary read timeouts do not kill the stream during long silent reasoning phases. Comment lines are ignored by standards-compliant SSE parsers.
 
 By default, the transport `headersTimeout` and `bodyTimeout` are set above the proxy's maximum upstream timeout so undici does not terminate long-running `/openai2` calls earlier than the configured OpenAI SDK budget unless an operator explicitly chooses a lower transport timeout.
+
+The inbound socket timeout is layered above both. A client socket is idle for the whole of a long non-streaming upstream call, so if `server.timeout` were not strictly greater than every upstream deadline, Node would destroy the socket before the proxy could write its `504`. Callers may therefore request the full `OPENAI_PROXY_UPSTREAM_MAX_TIMEOUT_MS` and still receive a classified `504`.
+
+Should the inbound socket cap fire anyway, the proxy handles it rather than letting the connection reset. It aborts upstream work and answers `504` with code `OPENAI_PROXY_SOCKET_TIMEOUT`, logging `proxy.request.socket_timeout`. A socket close is otherwise attributed by cause, recorded as `disconnectCause` on `proxy.request.complete`:
+
+| `disconnectCause` | Meaning | Result |
+| --- | --- | --- |
+| `client` | The caller hung up while upstream work was still in flight | `499` `client_cancelled`, counted as a cancellation |
+| `proxy_socket_timeout` | This proxy's own `server.timeout` fired | `504` `OPENAI_PROXY_SOCKET_TIMEOUT` |
+| `upstream_deadline_elapsed` | The close landed after every upstream attempt could have timed out — typically an intermediary with its own cap | `504` `OPENAI_PROXY_TIMEOUT` |
+
+Only `client` increments the cancellation metric, so a middle hop or the proxy's own cap tearing down a socket is no longer reported as caller-initiated cancellation.
+
+#### A hop in front of this proxy must be more patient than it is
+
+The timeout ladder only works if every layer is strictly more patient than the one
+it wraps. This proxy owns the inner three; the hop in front owns the outermost and
+is **not** derived from anything here, so raising the upstream budget silently
+inverts the ladder unless that hop is raised too.
+
+```
+undici headers/body      905_000   = upstream max + transport grace
+server.timeout           935_000   = latest upstream deadline + 30_000
+server.headersTimeout    985_000   = server.timeout + 50_000
+reverse proxy read       > 985_000  <-- NOT enforced from here
+```
+
+If the front hop's read timeout falls below `server.headersTimeout`, it answers
+first with its own error and every diagnostic this proxy reports — the resolved
+window, the timeout source, which timer fired — is lost, and the
+`OPENAI_PROXY_SOCKET_TIMEOUT` path becomes unreachable. `proxy.server.started`
+logs the resolved values under `timeouts`, so the required floor can be read from
+a running instance rather than recomputed by hand.
 
 If a reverse proxy (nginx, etc.) sits in front of this service, it must pass `text/event-stream` responses through unbuffered and its read timeout must be above the keep-alive interval.
 
@@ -251,7 +288,7 @@ Standard OpenAI Chat Completions body (`model`, `messages`, `response_format`, `
 
 #### Errors
 
-Errors are returned as OpenAI-compatible error objects (`{ "error": { "message", "type", "code" } }`):
+Errors are returned as OpenAI-compatible error objects (`{ "error": { "message", "type", "code" } }`), with the proxy's additional `requestId` and `timeout` diagnostic fields described under [Error Responses](#error-responses):
 
 - Missing/invalid `X-Security-Key` → `401`
 - Missing/malformed `Authorization` → `401`
@@ -410,7 +447,11 @@ OpenAI-facing routes now return structured JSON errors instead of generic plain-
     "type": "upstream_timeout",
     "code": "OPENAI_PROXY_TIMEOUT",
     "requestId": "a7a27871-9d49-40c0-8c7b-7d44d2770ce8",
-    "incomingRequestId": "edge-request-id-from-x-request-id"
+    "incomingRequestId": "edge-request-id-from-x-request-id",
+    "timeoutOrigin": "undici_headers_timeout",
+    "effectiveTimeoutMs": 900000,
+    "timeoutSource": "clamped",
+    "requestedTimeoutMs": 1200000
   }
 }
 ```
@@ -420,6 +461,27 @@ Correlation fields:
 - `requestId` is the proxy-local request UUID generated inside `chatgpt-proxy`.
 - `incomingRequestId` is the incoming `x-request-id` preserved from the caller or outer reverse proxy when present.
 - Error responses also include `X-Proxy-Request-Id` and, when available, `X-Incoming-Request-Id` response headers.
+
+Timeout fields:
+
+- `timeoutOrigin` names the timer that actually fired — `openai_sdk_timeout`, `anthropic_sdk_timeout`, `undici_connect_timeout`, `undici_headers_timeout`, `undici_body_timeout`, `proxy_socket_timeout`, or `unknown_timeout`. Omitted when the failure was not a timeout.
+- `effectiveTimeoutMs`, `timeoutSource`, and `requestedTimeoutMs` mirror the response headers below. They appear once an upstream budget has been applied to the request, so a validation or overload failure raised before that carries none of them rather than reporting a window it never used.
+
+#### Resolved Timeout Headers
+
+Every response that reached the point of resolving an upstream timeout — **successful ones included** — carries the resolved facts as headers, so a caller can size its own budget from the window the proxy actually applied instead of inferring it:
+
+| Header | Value |
+| --- | --- |
+| `x-openai-proxy-upstream-timeout-ms` | The per-attempt window applied to the upstream call |
+| `x-openai-proxy-timeout-source` | `default`, `provided`, `invalid`, or `clamped` |
+| `x-openai-proxy-requested-timeout-ms` | What the caller asked for; omitted when no `timeout` was supplied |
+| `x-openai-proxy-fetch-timeout-ms` | The undici response-headers timeout (`OPENAI_PROXY_TRANSPORT_HEADERS_TIMEOUT_MS`) |
+| `x-openai-proxy-timeout-origin` | Which timer fired; present on timeout failures only |
+
+The `*-ms` headers carry bare integers with no units or suffixes, so `Number()` parses them directly. `x-openai-proxy-timeout-origin` is emitted as a header as well as `error.timeoutOrigin` because a caller's HTTP-error path can read headers without parsing the error body. All are listed in `Access-Control-Expose-Headers`, so browser callers can read them cross-origin.
+
+Requests rejected before a timeout is resolved — auth failures, malformed bodies, `503` overload — carry no timeout headers, since no window was applied.
 
 Failure categories:
 

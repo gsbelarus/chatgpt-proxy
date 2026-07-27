@@ -6,7 +6,9 @@ import { Agent, fetch as undiciFetch } from "undici";
 
 import { logErrorEvent, logInfoEvent, sanitizeForLog } from "./proxyLogging.js";
 
-const DEFAULT_SERVER_TIMEOUT_MS = 900_000;
+const DEFAULT_SERVER_TIMEOUT_GRACE_MS = 30_000;
+const DEFAULT_KEEP_ALIVE_TIMEOUT_MS = 65_000;
+const SOCKET_TIMEOUT_TEARDOWN_GRACE_MS = 5_000;
 const DEFAULT_OPENAI_TIMEOUT_MS = 600_000;
 const DEFAULT_MAX_OPENAI_TIMEOUT_MS = 900_000;
 const DEFAULT_MAX_PARALLEL_REQUESTS = 32;
@@ -18,6 +20,17 @@ const DEFAULT_SSE_KEEP_ALIVE_INTERVAL_MS = 15_000;
 const REQUEST_ID_HEADER_NAME = "x-request-id";
 const PROXY_REQUEST_ID_RESPONSE_HEADER = "X-Proxy-Request-Id";
 const INCOMING_REQUEST_ID_RESPONSE_HEADER = "X-Incoming-Request-Id";
+
+// Resolved timeout facts, reported on success as well as failure so a caller can
+// size its own budget from the window the proxy actually applied. Callers parse
+// the *-ms values with Number(), so they carry bare integers and no units.
+export const TIMEOUT_RESPONSE_HEADERS = {
+  upstreamTimeoutMs: "x-openai-proxy-upstream-timeout-ms",
+  timeoutSource: "x-openai-proxy-timeout-source",
+  requestedTimeoutMs: "x-openai-proxy-requested-timeout-ms",
+  fetchTimeoutMs: "x-openai-proxy-fetch-timeout-ms",
+  timeoutOrigin: "x-openai-proxy-timeout-origin",
+} as const;
 
 export type UpstreamTimeoutConfig = {
   defaultTimeoutMs: number;
@@ -38,7 +51,17 @@ export type TimeoutOrigin =
   | "undici_connect_timeout"
   | "undici_headers_timeout"
   | "undici_body_timeout"
+  | "proxy_socket_timeout"
   | "unknown_timeout";
+
+// Why a client socket went away while the proxy was still working. Only
+// "client" is a real client cancellation; the others are the proxy's own
+// inbound socket cap firing, or a close that coincided with an already-elapsed
+// upstream deadline (typically an intermediary mirroring the proxy's timeout).
+export type DisconnectCause =
+  | "client"
+  | "proxy_socket_timeout"
+  | "upstream_deadline_elapsed";
 
 export type SanitizedCauseEntry = {
   name?: string;
@@ -160,8 +183,48 @@ export function resolveTransportTimeoutConfig(
 
 const transportTimeoutConfig = resolveTransportTimeoutConfig();
 
+// During a long non-streaming upstream call the client socket is idle for the
+// whole wait, so `server.timeout` is what decides whether the proxy still owns
+// the socket when an upstream deadline fires. It must outlast every upstream
+// deadline by enough margin to classify the failure and write the 504; if it
+// does not, Node destroys the socket first and the request is misreported as a
+// client cancellation. Operator overrides are clamped up to that floor.
+export function resolveServerTimeoutMs(
+  env: NodeJS.ProcessEnv = process.env,
+  upstreamConfig: UpstreamTimeoutConfig = upstreamTimeoutConfig,
+  transportConfig: TransportTimeoutConfig = transportTimeoutConfig,
+): number {
+  const latestUpstreamDeadlineMs = Math.max(
+    upstreamConfig.maxTimeoutMs,
+    transportConfig.headersTimeoutMs,
+    transportConfig.bodyTimeoutMs,
+  );
+  const minimumServerTimeoutMs =
+    latestUpstreamDeadlineMs + DEFAULT_SERVER_TIMEOUT_GRACE_MS;
+
+  return Math.max(
+    parsePositiveInteger(env.OPENAI_PROXY_SERVER_TIMEOUT_MS) ??
+      minimumServerTimeoutMs,
+    minimumServerTimeoutMs,
+  );
+}
+
+// How long an IDLE connection is kept for reuse between requests — unrelated to
+// how long one in-flight request may take. These were previously one number, so
+// the reuse window silently tracked the upstream maximum and reached ~15 minutes;
+// raising the upstream budget must not also make the proxy hoard idle sockets.
+export function resolveKeepAliveTimeoutMs(
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  return (
+    parsePositiveInteger(env.OPENAI_PROXY_KEEPALIVE_TIMEOUT_MS) ??
+    DEFAULT_KEEP_ALIVE_TIMEOUT_MS
+  );
+}
+
 export const proxyConfig = {
-  serverTimeoutMs: DEFAULT_SERVER_TIMEOUT_MS,
+  serverTimeoutMs: resolveServerTimeoutMs(),
+  keepAliveTimeoutMs: resolveKeepAliveTimeoutMs(),
   openaiMaxTimeoutMs: upstreamTimeoutConfig.maxTimeoutMs,
   openaiDefaultTimeoutMs: upstreamTimeoutConfig.defaultTimeoutMs,
   transportConnectTimeoutMs: transportTimeoutConfig.connectTimeoutMs,
@@ -364,7 +427,18 @@ export const concurrencyLimiter = new ConcurrencyLimiter(
   proxyConfig.maxParallelRequests,
 );
 
-type TimeoutSource = "default" | "provided" | "invalid" | "clamped";
+export type TimeoutSource = "default" | "provided" | "invalid" | "clamped";
+
+// Timeout detail returned to callers on error: which timer fired, the window
+// actually applied to the upstream call, where that window came from, and — when
+// the caller asked for more than the proxy allows — what it originally requested.
+// Field names match the context fields and the response headers they mirror.
+export type TimeoutDiagnostics = {
+  timeoutOrigin?: TimeoutOrigin;
+  effectiveTimeoutMs?: number;
+  timeoutSource?: TimeoutSource;
+  requestedTimeoutMs?: number;
+};
 
 export type OpenAIRequestOptions = {
   timeout: number;
@@ -402,13 +476,23 @@ export type RequestContext = {
   requestSafety: RequestSafety;
   retryCount: number;
   capturedFailure?: CapturedFailureDiagnostics;
-  clientDisconnected: boolean;
+  upstreamDeadlineAt?: number;
+  /**
+   * Set once the concurrency gate has admitted the request, i.e. upstream work is
+   * about to be dispatched under the resolved window. A capacity rejection is
+   * raised AFTER the timeout is resolved but BEFORE anything reaches upstream, so
+   * a resolved window alone is not evidence that a window was ever applied.
+   */
+  upstreamDispatchAuthorized: boolean;
+  socketClosed: boolean;
   disconnectReason?: string;
+  disconnectCause?: DisconnectCause;
   overload: boolean;
   cancellation: boolean;
   upstreamAbortAttempted: boolean;
   upstreamAbortSucceeded: boolean;
   addAbortHandler: (handler: () => void) => void;
+  setResponseHeader: (name: string, value: string) => void;
   cleanup: () => void;
 };
 
@@ -457,6 +541,15 @@ function setCorrelationResponseHeaders(
   }
 }
 
+// True once no upstream attempt for this request could still be in flight:
+// the per-attempt budget times every attempt the retry policy allows.
+function hasUpstreamDeadlineElapsed(context: RequestContext): boolean {
+  return (
+    context.upstreamDeadlineAt !== undefined &&
+    Date.now() >= context.upstreamDeadlineAt
+  );
+}
+
 export function createRequestContext(
   req: http.IncomingMessage,
   res: http.ServerResponse,
@@ -466,6 +559,7 @@ export function createRequestContext(
   const abortController = new AbortController();
   const incomingRequestId = readIncomingRequestId(req.headers);
   let cleanedUp = false;
+  let socketTeardownTimer: NodeJS.Timeout | undefined;
 
   const context: RequestContext = {
     requestId: randomUUID(),
@@ -484,13 +578,25 @@ export function createRequestContext(
     requestSafety: retryPolicies.unsafeCreate.requestSafety,
     retryCount: 0,
     capturedFailure: undefined,
-    clientDisconnected: false,
+    upstreamDispatchAuthorized: false,
+    socketClosed: false,
     overload: false,
     cancellation: false,
     upstreamAbortAttempted: false,
     upstreamAbortSucceeded: false,
     addAbortHandler: (handler: () => void) => {
       abortHandlers.add(handler);
+    },
+    // Lets code that only holds the context — buildOpenAIRequestOptions, the
+    // error path — stamp response headers without taking a reference to `res`.
+    // `headersSent` is part of the guard because setHeader throws once the head
+    // is on the wire, which is reachable on the streaming error path.
+    setResponseHeader: (name: string, value: string) => {
+      if (res.writableEnded || res.destroyed || res.headersSent) {
+        return;
+      }
+
+      res.setHeader(name, value);
     },
     cleanup: () => {
       if (cleanedUp) {
@@ -500,20 +606,28 @@ export function createRequestContext(
       cleanedUp = true;
       req.off("aborted", onRequestAborted);
       res.off("close", onResponseClose);
+      res.off("timeout", onResponseTimeout);
+
+      if (socketTeardownTimer) {
+        clearTimeout(socketTeardownTimer);
+        socketTeardownTimer = undefined;
+      }
+
       abortHandlers.clear();
     },
   };
 
   setCorrelationResponseHeaders(res, context);
 
-  const handleDisconnect = (reason: string) => {
-    if (context.clientDisconnected) {
+  const handleDisconnect = (reason: string, cause: DisconnectCause) => {
+    if (context.socketClosed) {
       return;
     }
 
-    context.clientDisconnected = true;
-    context.cancellation = true;
+    context.socketClosed = true;
+    context.cancellation = cause === "client";
     context.disconnectReason = reason;
+    context.disconnectCause = cause;
     context.upstreamAbortAttempted =
       !abortController.signal.aborted || abortHandlers.size > 0;
 
@@ -532,9 +646,8 @@ export function createRequestContext(
     }
 
     context.upstreamAbortSucceeded = upstreamAbortSucceeded;
-    metrics.recordCancellation();
 
-    logInfoEvent("proxy.request.cancelled", {
+    const disconnectPayload = {
       requestId: context.requestId,
       incomingRequestId: context.incomingRequestId,
       endpoint: context.endpoint,
@@ -545,23 +658,65 @@ export function createRequestContext(
       timeoutSource: context.timeoutSource,
       durationMs: Date.now() - context.startedAt,
       reason,
+      disconnectCause: cause,
       upstreamAbortAttempted: context.upstreamAbortAttempted,
       upstreamAbortSucceeded: context.upstreamAbortSucceeded,
+    };
+
+    if (cause === "client") {
+      metrics.recordCancellation();
+      logInfoEvent("proxy.request.cancelled", disconnectPayload);
+      return;
+    }
+
+    logErrorEvent("proxy.request.socket_timeout", {
+      ...disconnectPayload,
+      serverTimeoutMs: proxyConfig.serverTimeoutMs,
+      upstreamDeadlineAt: context.upstreamDeadlineAt,
     });
   };
 
   const onRequestAborted = () => {
-    handleDisconnect("request_aborted");
+    // The request message is incomplete, so this is the client cutting its own
+    // upload — never the proxy's socket cap, which can only fire once the
+    // request has been fully received.
+    handleDisconnect("request_aborted", "client");
   };
 
   const onResponseClose = () => {
-    if (!res.writableEnded) {
-      handleDisconnect("response_closed");
+    if (res.writableEnded) {
+      return;
     }
+
+    // A bare close is indistinguishable from a client hangup at the socket
+    // level, but one that lands after every upstream attempt could have timed
+    // out is an intermediary cap, not a user walking away.
+    handleDisconnect(
+      "response_closed",
+      hasUpstreamDeadlineElapsed(context)
+        ? "upstream_deadline_elapsed"
+        : "client",
+    );
+  };
+
+  // Registering this listener suppresses Node's default socket destroy on
+  // inactivity, so the proxy keeps the socket long enough to classify and write
+  // a 504 instead of the client seeing a bare reset. The grace timer below
+  // restores the teardown guarantee if the error path never settles.
+  const onResponseTimeout = () => {
+    handleDisconnect("server_socket_timeout", "proxy_socket_timeout");
+
+    socketTeardownTimer = setTimeout(() => {
+      if (!res.writableEnded && !res.destroyed) {
+        res.destroy();
+      }
+    }, SOCKET_TIMEOUT_TEARDOWN_GRACE_MS);
+    socketTeardownTimer.unref();
   };
 
   req.on("aborted", onRequestAborted);
   res.on("close", onResponseClose);
+  res.on("timeout", onResponseTimeout);
 
   return context;
 }
@@ -633,6 +788,32 @@ export function buildOpenAIRequestOptions(
   context.requestSafety = retryPolicy.requestSafety;
   context.capturedFailure = undefined;
   context.openaiRequestId = undefined;
+  // The SDK applies `timeout` per attempt, so the worst-case wall-clock deadline
+  // spans every attempt the policy permits. Taking the latest possible deadline
+  // keeps disconnect attribution conservative: a close mid-retry still reads as
+  // a client hangup rather than an elapsed upstream deadline.
+  context.upstreamDeadlineAt =
+    Date.now() + normalizedTimeout.timeoutMs * (retryPolicy.maxRetries + 1);
+
+  context.setResponseHeader(
+    TIMEOUT_RESPONSE_HEADERS.upstreamTimeoutMs,
+    String(normalizedTimeout.timeoutMs),
+  );
+  context.setResponseHeader(
+    TIMEOUT_RESPONSE_HEADERS.timeoutSource,
+    normalizedTimeout.source,
+  );
+  context.setResponseHeader(
+    TIMEOUT_RESPONSE_HEADERS.fetchTimeoutMs,
+    String(proxyConfig.transportHeadersTimeoutMs),
+  );
+
+  if (normalizedTimeout.requestedTimeoutMs !== undefined) {
+    context.setResponseHeader(
+      TIMEOUT_RESPONSE_HEADERS.requestedTimeoutMs,
+      String(normalizedTimeout.requestedTimeoutMs),
+    );
+  }
 
   return {
     timeout: normalizedTimeout.timeoutMs,
@@ -802,10 +983,16 @@ function inferTimeoutOrigin(
     return "undici_body_timeout";
   }
 
+  // Deliberately `socketClosed`, not `disconnectCause !== "client"`: whenever a
+  // socket close made the proxy abort upstream work, the resulting abort error is
+  // the proxy's own, so it is never evidence that the SDK's timer fired. A
+  // genuine SDK timeout that coincided with a close is still attributed, because
+  // `resolveTimeoutOrigin` matches the typed `APIConnectionTimeoutError` before
+  // reaching this heuristic.
   if (
     requestSignalAborted &&
     isAbortLikeError(error) &&
-    !context.clientDisconnected
+    !context.socketClosed
   ) {
     return "openai_sdk_timeout";
   }
@@ -822,7 +1009,7 @@ function captureFailureDiagnostics(
   error: unknown,
   signal: AbortSignal | null | undefined,
 ): CapturedFailureDiagnostics | undefined {
-  if (context.clientDisconnected && isAbortLikeError(error)) {
+  if (context.socketClosed && isAbortLikeError(error)) {
     context.capturedFailure = undefined;
     return undefined;
   }
@@ -1118,9 +1305,37 @@ export function classifyProxyError(
   context: RequestContext,
 ): ClassifiedProxyError {
   if (
-    context.clientDisconnected ||
+    context.socketClosed ||
     (isAbortLikeError(error) && context.abortController.signal.aborted)
   ) {
+    // A socket that the proxy's own inbound cap tore down is a gateway timeout,
+    // not a client cancellation. The socket survives here because the response
+    // "timeout" listener suppressed Node's destroy, so the 504 is still
+    // writable — hence suppressResponse stays false.
+    if (context.disconnectCause === "proxy_socket_timeout") {
+      return {
+        status: 504,
+        type: "upstream_timeout",
+        code: "OPENAI_PROXY_SOCKET_TIMEOUT",
+        message:
+          "Inbound socket timed out before the upstream response completed",
+        timeoutOrigin: "proxy_socket_timeout",
+        suppressResponse: false,
+      };
+    }
+
+    if (context.disconnectCause === "upstream_deadline_elapsed") {
+      return {
+        status: 504,
+        type: "upstream_timeout",
+        code: "OPENAI_PROXY_TIMEOUT",
+        message: "Timeout while waiting for upstream response",
+        timeoutOrigin:
+          resolveTimeoutOrigin(error, context) ?? "unknown_timeout",
+        suppressResponse: false,
+      };
+    }
+
     return {
       status: 499,
       type: "client_cancelled",
@@ -1223,6 +1438,34 @@ export function classifyProxyError(
   };
 }
 
+// The proxy knows which timer fired and what window it applied, so it reports
+// both rather than leaving callers to re-derive the budget from configuration.
+// Gated on an applied upstream budget: a request that failed before its timeout
+// was resolved must not report a window it never used.
+function buildTimeoutDiagnostics(
+  context: RequestContext,
+  classifiedError: ClassifiedProxyError,
+): TimeoutDiagnostics {
+  const windowApplied =
+    context.upstreamDeadlineAt !== undefined &&
+    context.upstreamDispatchAuthorized;
+
+  return {
+    ...(classifiedError.timeoutOrigin
+      ? { timeoutOrigin: classifiedError.timeoutOrigin }
+      : {}),
+    ...(windowApplied
+      ? {
+          effectiveTimeoutMs: context.effectiveTimeoutMs,
+          timeoutSource: context.timeoutSource,
+          ...(context.requestedTimeoutMs !== undefined
+            ? { requestedTimeoutMs: context.requestedTimeoutMs }
+            : {}),
+        }
+      : {}),
+  };
+}
+
 function buildErrorBody(
   context: RequestContext,
   classifiedError: ClassifiedProxyError,
@@ -1236,6 +1479,7 @@ function buildErrorBody(
       ...(context.incomingRequestId
         ? { incomingRequestId: context.incomingRequestId }
         : {}),
+      ...buildTimeoutDiagnostics(context, classifiedError),
       ...(classifiedError.upstream
         ? { upstream: classifiedError.upstream }
         : {}),
@@ -1391,7 +1635,9 @@ function logCompletion(
     retryCount: context.retryCount,
     overload: context.overload,
     cancellation: context.cancellation,
-    clientDisconnected: context.clientDisconnected,
+    socketClosed: context.socketClosed,
+    disconnectReason: context.disconnectReason,
+    disconnectCause: context.disconnectCause,
     ...extras,
   };
 
@@ -1435,6 +1681,15 @@ export function handleRequestError(
 
   if (classifiedError.type !== "client_cancelled") {
     metrics.recordError();
+  }
+
+  // Also a header, not only a body field: a caller's HTTP-error path reads
+  // headers reliably but does not always parse the error body.
+  if (classifiedError.timeoutOrigin) {
+    context.setResponseHeader(
+      TIMEOUT_RESPONSE_HEADERS.timeoutOrigin,
+      classifiedError.timeoutOrigin,
+    );
   }
 
   if (!classifiedError.suppressResponse) {

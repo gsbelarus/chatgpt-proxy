@@ -32,9 +32,11 @@ import {
   sendJson,
   sendSseHeaders,
   startSseKeepAlive,
+  TIMEOUT_RESPONSE_HEADERS,
   unauthorizedError,
   writeSseEvent,
   type ConcurrencyLease,
+  type RequestContext,
   type SseKeepAlive,
   type UsageMetrics,
 } from "./proxyRuntime.js";
@@ -48,6 +50,18 @@ import {
 config({ path: [".env.local", ".env"] });
 
 const defaultModel = process.env.DEFAULT_MODEL ?? "gpt-5.4-mini";
+
+// Browser callers can only read these off a cross-origin response when they are
+// exposed, so the timeout headers are listed from the same constant that emits
+// them rather than duplicated here.
+const exposedResponseHeaders = [
+  "X-Proxy-Request-Id",
+  "X-Incoming-Request-Id",
+  "X-SSE-Cap-Probe-Version",
+  "X-SSE-Cap-Probe-Mode",
+  "Retry-After",
+  ...Object.values(TIMEOUT_RESPONSE_HEADERS),
+].join(", ");
 type ChatGPTAPIConstructor = (typeof import("chatgpt"))["ChatGPTAPI"];
 type ChatGPTCompletionParams = NonNullable<
   ConstructorParameters<ChatGPTAPIConstructor>[0]["completionParams"]
@@ -334,7 +348,11 @@ function usageFromAnthropic(message: {
   };
 }
 
-function acquireLease(): ConcurrencyLease {
+// Admission to the concurrency gate is the point past which upstream work is
+// actually dispatched under the resolved timeout window. Recording it on the
+// context keeps a capacity rejection — raised after the window is resolved but
+// before anything reaches upstream — from reporting a window it never applied.
+function acquireLease(context: RequestContext): ConcurrencyLease {
   const lease = concurrencyLimiter.tryAcquire();
 
   if (!lease) {
@@ -342,6 +360,8 @@ function acquireLease(): ConcurrencyLease {
       "Proxy is handling too many concurrent requests. Please retry shortly.",
     );
   }
+
+  context.upstreamDispatchAuthorized = true;
 
   return lease;
 }
@@ -428,7 +448,7 @@ async function handleOpenAIChatCompletion(
       context,
     );
 
-    lease = acquireLease();
+    lease = acquireLease(context);
 
     const completionPayload = {
       ...createChatCompletion,
@@ -548,7 +568,7 @@ async function handleOpenAICompatibleChatCompletion(
       context,
     );
 
-    lease = acquireLease();
+    lease = acquireLease(context);
 
     const chatCompletion = await openai.chat.completions.create(
       data as unknown as ChatCompletionCreateParamsNonStreaming,
@@ -668,7 +688,7 @@ async function handleAudioTranscription(
       context,
     );
 
-    lease = acquireLease();
+    lease = acquireLease(context);
 
     const audioFile = await toFile(audioBuffer, audioFilename);
     const transcription = await openai.audio.transcriptions.create(
@@ -736,7 +756,7 @@ async function handleResponsesCreate(
       context,
     );
 
-    lease = acquireLease();
+    lease = acquireLease(context);
 
     if (stream) {
       if (!sendSseHeaders(res)) {
@@ -750,7 +770,7 @@ async function handleResponsesCreate(
         requestOptions,
       );
       const onEvent = (event: unknown) => {
-        if (!context.clientDisconnected) {
+        if (!context.socketClosed) {
           keepAlive?.touch();
           writeSseEvent(res, event);
         }
@@ -765,7 +785,7 @@ async function handleResponsesCreate(
       try {
         const finalResponse = await responseStream.finalResponse();
 
-        if (!context.clientDisconnected) {
+        if (!context.socketClosed) {
           endSse(res);
           finalizeSuccessfulRequest(
             context,
@@ -886,7 +906,7 @@ async function handleResponsesCompact(
       context,
     );
 
-    lease = acquireLease();
+    lease = acquireLease(context);
 
     const response = await openai.responses.compact(
       compactPayload as unknown as ResponseCompactPayload,
@@ -942,7 +962,7 @@ async function handleResponsesInputTokens(
       context,
     );
 
-    lease = acquireLease();
+    lease = acquireLease(context);
 
     const response = await openai.responses.inputTokens.count(
       inputTokensPayload as unknown as ResponseInputTokensPayload,
@@ -1004,7 +1024,7 @@ async function handleResponsesInputItems(
       context,
     );
 
-    lease = acquireLease();
+    lease = acquireLease(context);
 
     const response = await openai.responses.inputItems.list(
       responseId,
@@ -1077,7 +1097,7 @@ async function handleResponsesRetrieve(
       context,
     );
 
-    lease = acquireLease();
+    lease = acquireLease(context);
 
     const retrieveParams = {
       include: includeResult.include,
@@ -1112,7 +1132,7 @@ async function handleResponsesRetrieve(
         }
       }
 
-      if (!context.clientDisconnected) {
+      if (!context.socketClosed) {
         endSse(res);
         finalizeSuccessfulRequest(context, 200);
       }
@@ -1175,7 +1195,7 @@ async function handleResponsesCancel(
       context,
     );
 
-    lease = acquireLease();
+    lease = acquireLease(context);
 
     const response = await openai.responses.cancel(responseId, requestOptions);
 
@@ -1224,7 +1244,7 @@ async function handleResponsesDelete(
       context,
     );
 
-    lease = acquireLease();
+    lease = acquireLease(context);
 
     const response = await openai.responses.delete(responseId, requestOptions);
 
@@ -1282,7 +1302,7 @@ async function handleAnthropicMessages(
       anthropic_api_key: getString(anthropic_api_key),
     });
 
-    lease = acquireLease();
+    lease = acquireLease(context);
 
     const message = await anthropic.messages.create(
       messagesPayload as unknown as MessageCreateParamsNonStreaming,
@@ -1336,7 +1356,7 @@ async function handleAnthropicMessagesStream(
       anthropic_api_key: getString(anthropic_api_key),
     });
 
-    lease = acquireLease();
+    lease = acquireLease(context);
 
     if (!sendSseHeaders(res)) {
       return;
@@ -1355,7 +1375,7 @@ async function handleAnthropicMessagesStream(
     });
 
     const onStreamEvent = (event: unknown) => {
-      if (!context.clientDisconnected) {
+      if (!context.socketClosed) {
         writeSseEvent(res, event);
       }
     };
@@ -1365,7 +1385,7 @@ async function handleAnthropicMessagesStream(
     try {
       const finalMessage = await messageStream.finalMessage();
 
-      if (!context.clientDisconnected) {
+      if (!context.socketClosed) {
         endSse(res);
         finalizeSuccessfulRequest(
           context,
@@ -1426,7 +1446,7 @@ async function handleEmbeddings(
       context,
     );
 
-    lease = acquireLease();
+    lease = acquireLease(context);
 
     const embeddingsPayload = {
       model: getString(model) ?? "text-embedding-3-large",
@@ -1467,10 +1487,7 @@ export const server = http.createServer(async (req, res) => {
     "Access-Control-Allow-Headers",
     "Origin, X-Requested-With, Content-Type, Accept, X-Request-Id",
   );
-  res.setHeader(
-    "Access-Control-Expose-Headers",
-    "X-Proxy-Request-Id, X-Incoming-Request-Id, X-SSE-Cap-Probe-Version, X-SSE-Cap-Probe-Mode, Retry-After",
-  );
+  res.setHeader("Access-Control-Expose-Headers", exposedResponseHeaders);
 
   if (req.method === "OPTIONS") {
     res.writeHead(200);
@@ -1703,7 +1720,7 @@ export const server = http.createServer(async (req, res) => {
 
 server.requestTimeout = proxyConfig.serverTimeoutMs;
 server.timeout = proxyConfig.serverTimeoutMs;
-server.keepAliveTimeout = proxyConfig.serverTimeoutMs;
+server.keepAliveTimeout = proxyConfig.keepAliveTimeoutMs;
 server.headersTimeout = proxyConfig.serverTimeoutMs + 50_000;
 
 const port = 3002;
