@@ -58,9 +58,7 @@ export type TimeoutOrigin =
 // inbound socket cap firing, or a close that coincided with an already-elapsed
 // upstream deadline (typically an intermediary mirroring the proxy's timeout).
 export type DisconnectCause =
-  | "client"
-  | "proxy_socket_timeout"
-  | "upstream_deadline_elapsed";
+  "client" | "proxy_socket_timeout" | "upstream_deadline_elapsed";
 
 export type SanitizedCauseEntry = {
   name?: string;
@@ -268,6 +266,71 @@ export const proxyEndpointRetryPolicies = {
   "/anthropic": retryPolicies.unsafeCreate,
   "/anthropic/stream": retryPolicies.unsafeCreate,
 } as const satisfies Record<string, RequestRetryPolicy>;
+
+export type ProxyConfigStaleness = Readonly<{
+  key: string;
+  applied: number;
+  configured: number;
+}>;
+
+/**
+ * Re-resolves the configuration from the CURRENT environment and reports every
+ * value that disagrees with what this module froze at evaluation time.
+ *
+ * This exists because the failure mode it detects is silent. Everything in
+ * `proxyConfig` is resolved at module scope, so any future import that pulls this
+ * module in before the environment is loaded would revert the service to built-in
+ * defaults while still starting cleanly and serving traffic. A non-empty result
+ * means the process is running on defaults that its own configuration
+ * contradicts.
+ */
+export function collectStaleProxyConfig(
+  env: NodeJS.ProcessEnv = process.env,
+): ProxyConfigStaleness[] {
+  const upstream = resolveUpstreamTimeoutConfig(env);
+  const transport = resolveTransportTimeoutConfig(env, upstream);
+  const candidates: Array<[string, number, number]> = [
+    [
+      "openaiDefaultTimeoutMs",
+      proxyConfig.openaiDefaultTimeoutMs,
+      upstream.defaultTimeoutMs,
+    ],
+    [
+      "openaiMaxTimeoutMs",
+      proxyConfig.openaiMaxTimeoutMs,
+      upstream.maxTimeoutMs,
+    ],
+    [
+      "transportConnectTimeoutMs",
+      proxyConfig.transportConnectTimeoutMs,
+      transport.connectTimeoutMs,
+    ],
+    [
+      "transportHeadersTimeoutMs",
+      proxyConfig.transportHeadersTimeoutMs,
+      transport.headersTimeoutMs,
+    ],
+    [
+      "transportBodyTimeoutMs",
+      proxyConfig.transportBodyTimeoutMs,
+      transport.bodyTimeoutMs,
+    ],
+    [
+      "serverTimeoutMs",
+      proxyConfig.serverTimeoutMs,
+      resolveServerTimeoutMs(env, upstream, transport),
+    ],
+    [
+      "keepAliveTimeoutMs",
+      proxyConfig.keepAliveTimeoutMs,
+      resolveKeepAliveTimeoutMs(env),
+    ],
+  ];
+
+  return candidates
+    .filter(([, applied, configured]) => applied !== configured)
+    .map(([key, applied, configured]) => ({ key, applied, configured }));
+}
 
 export function buildRuntimeDiagnosticsSnapshot(
   server: Pick<

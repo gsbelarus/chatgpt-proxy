@@ -3,9 +3,7 @@ import type http from "http";
 export const SSE_CAP_PROBE_VERSION = "1";
 
 export type SseCapProbeMode =
-  | "active-data"
-  | "comment-heartbeat"
-  | "silent-control";
+  "active-data" | "comment-heartbeat" | "silent-control";
 
 export type SseCapProbeOptions = {
   mode: SseCapProbeMode;

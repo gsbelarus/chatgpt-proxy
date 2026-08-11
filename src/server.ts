@@ -1,5 +1,7 @@
+// MUST stay first: loads .env before any module that reads process.env while
+// being evaluated. See src/loadEnv.ts.
+import "./loadEnv.js";
 import http from "http";
-import { config } from "dotenv";
 import OpenAI, { toFile } from "openai";
 import Anthropic from "@anthropic-ai/sdk";
 import Busboy from "busboy";
@@ -18,6 +20,7 @@ import {
   badRequestError,
   buildRuntimeDiagnosticsSnapshot,
   buildOpenAIRequestOptions,
+  collectStaleProxyConfig,
   concurrencyLimiter,
   createOpenAIClient,
   createRequestContext,
@@ -46,8 +49,6 @@ import {
   sendSseCapProbeHeaders,
   startSseCapProbe,
 } from "./sseCapProbe.js";
-
-config({ path: [".env.local", ".env"] });
 
 const defaultModel = process.env.DEFAULT_MODEL ?? "gpt-5.4-mini";
 

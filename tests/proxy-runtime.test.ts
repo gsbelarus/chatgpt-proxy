@@ -12,6 +12,7 @@ import {
   buildRuntimeDiagnosticsSnapshot,
   buildOpenAIRequestOptions,
   classifyProxyError,
+  collectStaleProxyConfig,
   ConcurrencyLimiter,
   createRequestContext,
   handleRequestError,
@@ -156,6 +157,25 @@ test("resolveServerTimeoutMs tracks the latest upstream deadline", () => {
   );
 
   assert.equal(serverTimeoutMs, 1_235_000);
+});
+
+test("stale configuration is detected rather than served silently", () => {
+  // Everything in proxyConfig is resolved at module scope, so an import that
+  // pulls this module in before the environment is loaded reverts the process to
+  // defaults while still starting cleanly. That must be reported, not absorbed.
+  assert.deepEqual(collectStaleProxyConfig(process.env), []);
+
+  const stale = collectStaleProxyConfig({
+    OPENAI_PROXY_UPSTREAM_MAX_TIMEOUT_MS: String(proxyConfig.openaiMaxTimeoutMs * 2),
+  } as NodeJS.ProcessEnv);
+  const keys = stale.map((entry) => entry.key);
+
+  assert.ok(keys.includes("openaiMaxTimeoutMs"));
+  // The derived values must be reported too: a stale maximum silently drags the
+  // transport and inbound socket budgets with it.
+  assert.ok(keys.includes("transportHeadersTimeoutMs"));
+  assert.ok(keys.includes("serverTimeoutMs"));
+  assert.ok(stale.every((entry) => entry.applied !== entry.configured));
 });
 
 test("the idle keep-alive window does not track the upstream budget", () => {
