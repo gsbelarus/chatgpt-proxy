@@ -2,7 +2,6 @@ import http from "http";
 import { randomUUID } from "crypto";
 import OpenAI from "openai";
 import Anthropic from "@anthropic-ai/sdk";
-import { Agent, fetch as undiciFetch } from "undici";
 
 import { logErrorEvent, logInfoEvent, sanitizeForLog } from "./proxyLogging.js";
 
@@ -280,7 +279,7 @@ export function buildRuntimeDiagnosticsSnapshot(
     runtime: {
       nodeVersion: process.version,
       undiciVersion: process.versions.undici ?? null,
-      transportImplementation: "undici.fetch",
+      transportImplementation: "globalThis.fetch",
     },
     timeouts: {
       defaultUpstreamTimeoutMs: proxyConfig.openaiDefaultTimeoutMs,
@@ -828,14 +827,6 @@ type OpenAIAuthOverrides = {
   organization?: string;
 };
 
-type UndiciFetchInit = NonNullable<Parameters<typeof undiciFetch>[1]>;
-
-const openAITransportDispatcher = new Agent({
-  connectTimeout: proxyConfig.transportConnectTimeoutMs,
-  headersTimeout: proxyConfig.transportHeadersTimeoutMs,
-  bodyTimeout: proxyConfig.transportBodyTimeoutMs,
-});
-
 function sanitizeLogMessage(message: string): string {
   const sanitized = sanitizeForLog(message);
 
@@ -1086,9 +1077,6 @@ export function createOpenAIClient(
     organization: auth.organization ?? null,
     timeout: proxyConfig.openaiDefaultTimeoutMs,
     maxRetries: 0,
-    fetchOptions: {
-      dispatcher: openAITransportDispatcher,
-    },
     fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
       const attempt = extractRetryAttempt(init?.headers) + 1;
 
@@ -1111,10 +1099,7 @@ export function createOpenAIClient(
       }
 
       try {
-        const response = (await undiciFetch(
-          input as Parameters<typeof undiciFetch>[0],
-          init as UndiciFetchInit | undefined,
-        )) as unknown as Response;
+        const response = await globalThis.fetch(input, init);
 
         context.capturedFailure = undefined;
         captureOpenAIResponseMetadata(context, response);
