@@ -45,6 +45,10 @@ import {
 } from "./proxyRuntime.js";
 import { errors, infos, logErrorEvent, logInfoEvent } from "./proxyLogging.js";
 import {
+  handleCompatibleResponses,
+  responsesExposedHeaders,
+} from "./responsesCompatible.js";
+import {
   parseSseCapProbeOptions,
   sendSseCapProbeHeaders,
   startSseCapProbe,
@@ -1490,6 +1494,17 @@ export const server = http.createServer(async (req, res) => {
   );
   res.setHeader("Access-Control-Expose-Headers", exposedResponseHeaders);
 
+  if (pathname === "/v1/responses") {
+    res.setHeader(
+      "Access-Control-Allow-Headers",
+      "Origin, X-Requested-With, Content-Type, Accept, X-Request-Id, Authorization, X-Security-Key, OpenAI-Project, OpenAI-Organization, User-Agent, X-Stainless-Lang, X-Stainless-Package-Version, X-Stainless-OS, X-Stainless-Arch, X-Stainless-Runtime, X-Stainless-Runtime-Version, X-Stainless-Retry-Count, X-Stainless-Timeout",
+    );
+    res.setHeader(
+      "Access-Control-Expose-Headers",
+      [exposedResponseHeaders, ...responsesExposedHeaders].join(", "),
+    );
+  }
+
   if (req.method === "OPTIONS") {
     res.writeHead(200);
     res.end();
@@ -1595,6 +1610,11 @@ export const server = http.createServer(async (req, res) => {
 
   if (pathname === "/v1/chat/completions" && req.method === "POST") {
     await handleOpenAICompatibleChatCompletion(req, res);
+    return;
+  }
+
+  if (pathname === "/v1/responses" && req.method === "POST") {
+    await handleCompatibleResponses(req, res);
     return;
   }
 

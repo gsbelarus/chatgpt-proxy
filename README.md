@@ -7,6 +7,7 @@ A lightweight HTTP proxy server for OpenAI and Anthropic APIs. It wraps the offi
 - **Responses API** — OpenAI's most advanced interface with tools, web search, file search, MCP, function calling, and streaming
 - **Chat Completions** — Full OpenAI Chat Completions API support including vision (images)
 - **OpenAI-compatible endpoint** — `POST /v1/chat/completions` with header-based auth for standard OpenAI SDKs and Spring AI (just override the base URL)
+- **OpenAI-compatible Responses** — `POST /v1/responses` with inline Base64 documents, header-based auth, JSON responses, and Responses SSE events
 - **Anthropic Claude** — Anthropic Messages API with streaming, vision, tool use, and extended thinking
 - **Audio Transcriptions** — Whisper-based speech-to-text
 - **Embeddings** — Generate text embeddings
@@ -373,6 +374,101 @@ const completion = await client.chat.completions.create({
 ```
 
 > OpenAI SDKs append `/chat/completions` to `base_url`, so include the `/v1` segment (e.g. `https://proxy.example.com/v1`). This lands on the same `/v1/chat/completions` route as the Spring AI configuration above.
+
+---
+
+### `POST /v1/responses`
+
+Proxies JSON requests to `POST https://api.openai.com/v1/responses` using the official OpenAI SDK. Supports ordinary Responses inputs and inline documents (`.doc`, `.docx`, `.xls`, `.xlsx`, and other formats accepted by OpenAI). The proxy forwards file bytes as supplied; it does not convert or parse Office documents. No `/v1/files` upload is needed.
+
+This is a separate endpoint. Existing `/openai2`, Chat Completions, audio, embeddings, and Anthropic routes retain their previous contracts and limits.
+
+#### Headers
+
+| Header | Required | Description |
+| --- | --- | --- |
+| `Authorization: Bearer <api_key>` | Yes | OpenAI API key; required even if a server key is configured |
+| `X-Security-Key` | Yes | Must match the server's non-empty `SECURITY_KEY` |
+| `Content-Type: application/json` | Yes | Documents are embedded in JSON, not multipart uploads |
+| `OpenAI-Project` | No | OpenAI project; defaults to `OPENAI_PROJECT_KEY` if configured |
+| `OpenAI-Organization` | No | OpenAI organization |
+
+Unlike `/openai2`, this route does not use body fields such as `security_key`, `openai_api_key`, or `timeout`. It uses the configured upstream timeout. Standard Responses fields are forwarded to OpenAI, including `tools`, `text`, `previous_response_id`, and `stream`.
+
+#### Inline documents
+
+Validation and the shared decoded-file size budget cover `input[*].content`, `function_call_output.output`, `custom_tool_call_output.output`, and `prompt.variables`, including prompt-only requests. Inline files in all these locations enable error-message redaction.
+
+CORS on `/v1/responses` explicitly permits the OpenAI JavaScript SDK's `X-Stainless-*` platform, version, retry-count, and timeout headers. Existing routes retain their CORS policy.
+
+Each inline content part uses `type: "input_file"`, a non-empty `filename`, and `file_data`. Both plain Base64 and `data:<MIME-type>;base64,<Base64>` are accepted. Base64 must have no whitespace; padded and unpadded canonical encodings are accepted. Multiple documents can be included in the same `content` array. Existing `file_id`/`file_url` inputs are forwarded, but this release adds no file-management routes.
+
+| Extension | MIME type for data URLs |
+| --- | --- |
+| `.doc` | `application/msword` |
+| `.docx` | `application/vnd.openxmlformats-officedocument.wordprocessingml.document` |
+| `.xls` | `application/vnd.ms-excel` |
+| `.xlsx` | `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` |
+
+Example using the Node.js OpenAI SDK (set `OPENAI_MODEL` to a model supporting your inputs):
+
+```javascript
+import { readFile } from "node:fs/promises";
+import OpenAI from "openai";
+
+const client = new OpenAI({
+  baseURL: "http://localhost:3002/v1",
+  apiKey: process.env.OPENAI_API_KEY,
+  defaultHeaders: { "X-Security-Key": process.env.SECURITY_KEY },
+});
+
+const fileData = (await readFile("report.docx")).toString("base64");
+const payload = {
+  model: process.env.OPENAI_MODEL,
+  input: [{
+    role: "user",
+    content: [
+      { type: "input_text", text: "Summarize this document." },
+      {
+        type: "input_file",
+        filename: "report.docx",
+        file_data: `data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,${fileData}`,
+      },
+    ],
+  }],
+};
+
+const response = await client.responses.create(payload);
+console.log(response.output_text);
+
+// Alternative to the call above: stream the response.
+// const stream = await client.responses.create({ ...payload, stream: true });
+// for await (const event of stream) {
+//   if (event.type === "response.output_text.delta") process.stdout.write(event.delta);
+// }
+```
+
+#### Limits, responses, and errors
+
+- `OPENAI_PROXY_RESPONSES_MAX_BODY_BYTES` controls the JSON body limit **only for this route**. Default: `70000000` bytes. Invalid/non-positive values fall back to the default. The reader enforces it for both `Content-Length` and chunked uploads.
+- Each decoded inline file must be smaller than `50000000` bytes; their combined decoded size must not exceed `50000000` bytes. Base64 adds about one third to the wire size. URL/file-ID inputs remain subject to upstream limits.
+- Capacity is reserved before buffering the JSON body using `OPENAI_PROXY_MAX_PARALLEL_REQUESTS`. Size this setting and the body limit for available memory; requests still require JSON parsing and serialization. Configure any reverse proxy's body limit accordingly.
+- Malformed JSON, invalid Base64, missing filenames, or conflicting file sources return `400`; missing/invalid auth returns `401`; oversized requests return `413`; unsupported content types return `415`; saturation returns `503` with `Retry-After`.
+- Non-streaming responses preserve the upstream JSON object and HTTP status. Upstream HTTP errors preserve status and standard `error.type`, `error.code`, and `error.param`. For requests containing inline files, upstream error messages (including failed Responses and SSE error events) are replaced with a generic message to prevent echoed document data. Upstream error bodies and SDK request payloads are not logged.
+- Responses expose upstream `x-request-id`, rate-limit headers, `Retry-After`, and the existing proxy correlation/timeout headers when available. Create calls have **zero proxy retries**.
+- Streaming starts only after OpenAI accepts the request, so initial upstream errors retain their HTTP status. SSE uses named Responses events (`event: response.output_text.delta`, etc.), keep-alive comments, and terminal events, with no synthetic `[DONE]`. Proxy failures after headers are sent use `event: error`; clients must handle failure/incomplete events as well as completion.
+- Streaming respects downstream backpressure. Disconnects cancel upstream work and release capacity. The route reuses the existing transport/socket timeout configuration.
+- This release adds only `POST /v1/responses`; it does not add `/v1/responses/{id}` retrieval/cancellation, Files, or Containers endpoints. Use foreground JSON or SSE requests for a complete workflow through this route.
+
+OpenAI extracts text from Word documents; embedded non-PDF images/charts are not included in model context. Direct spreadsheet input processes up to the first 1,000 rows per sheet, so it is not a substitute for calculations over an entire large workbook. See [OpenAI file inputs](https://developers.openai.com/api/docs/guides/file-inputs) and [Responses streaming](https://developers.openai.com/api/docs/guides/streaming-responses).
+
+Run the regression suite sequentially because existing HTTP test suites bind port 3002:
+
+```bash
+node --import tsx --test --test-concurrency=1 "tests/**/*.test.ts"
+```
+
+Tests use a local upstream stub; they verify transport/contracts, not OpenAI's actual document extraction quality or model access.
 
 ---
 
