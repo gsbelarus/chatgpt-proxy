@@ -255,6 +255,7 @@ export const retryPolicies = {
 export const proxyEndpointRetryPolicies = {
   "/openai": retryPolicies.unsafeCreate,
   "/v1/chat/completions": retryPolicies.unsafeCreate,
+  "/v1/responses": retryPolicies.unsafeCreate,
   "/openai/audio/transcriptions": retryPolicies.unsafeCreate,
   "/openai2": retryPolicies.unsafeCreate,
   "/openai2/compact": retryPolicies.unsafeCreate,
