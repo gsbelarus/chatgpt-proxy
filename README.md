@@ -390,7 +390,8 @@ This is a separate endpoint. Existing `/openai2`, Chat Completions, audio, embed
 | `Authorization: Bearer <api_key>` | Yes | OpenAI API key; required even if a server key is configured |
 | `X-Security-Key` | Yes | Must match the server's non-empty `SECURITY_KEY` |
 | `Content-Type: application/json` | Yes | Documents are embedded in JSON, not multipart uploads |
-| `OpenAI-Project` | No | OpenAI project; defaults to `OPENAI_PROJECT_KEY` if configured |
+| `OpenAI-Project` | No | OpenAI project; takes precedence over `X-Project` |
+| `X-Project` | No | Compatibility alias used by `/v1/chat/completions`; forwarded as `OpenAI-Project`. If neither header is supplied, defaults to `OPENAI_PROJECT_KEY` if configured |
 | `OpenAI-Organization` | No | OpenAI organization |
 
 Unlike `/openai2`, this route does not use body fields such as `security_key`, `openai_api_key`, or `timeout`. It uses the configured upstream timeout. Standard Responses fields are forwarded to OpenAI, including `tools`, `text`, `previous_response_id`, and `stream`.

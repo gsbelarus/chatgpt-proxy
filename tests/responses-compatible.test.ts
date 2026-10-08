@@ -242,6 +242,54 @@ describe("OpenAI-compatible Responses endpoint", { timeout: 20_000 }, () => {
     assert.equal(result.output_text, "Document read");
   });
 
+  test("accepts legacy X-Project and forwards it as OpenAI-Project with the caller's key", async () => {
+    const previous = process.env.OPENAI_PROJECT_KEY;
+    process.env.OPENAI_PROJECT_KEY = "proj_server_default";
+    try {
+      const result = await request(body(), {
+        headers: { "X-Project": "proj_legacy" },
+      });
+      assert.equal(result.status, 200);
+      assert.equal(captured[0].headers["openai-project"], "proj_legacy");
+      assert.equal(captured[0].headers.authorization, `Bearer ${KEY}`);
+      assert.equal(captured[0].headers["x-security-key"], undefined);
+      assert.equal(captured[0].headers["x-project"], undefined);
+    } finally {
+      if (previous === undefined) delete process.env.OPENAI_PROJECT_KEY;
+      else process.env.OPENAI_PROJECT_KEY = previous;
+    }
+  });
+
+  test("OpenAI-Project takes precedence over X-Project", async () => {
+    await request(body(), {
+      headers: {
+        "OpenAI-Project": "proj_standard",
+        "X-Project": "proj_legacy",
+      },
+    });
+    assert.equal(captured[0].headers["openai-project"], "proj_standard");
+  });
+
+  test("preflight allows the existing client X-Project header", async () => {
+    const result = await request(
+      {},
+      {
+        method: "OPTIONS",
+        headers: {
+          Origin: "https://client.example",
+          "Access-Control-Request-Method": "POST",
+          "Access-Control-Request-Headers":
+            "authorization,x-security-key,x-project,content-type",
+        },
+      },
+    );
+    const allowed = String(result.headers["access-control-allow-headers"])
+      .toLowerCase()
+      .split(/,\s*/);
+    assert.equal(result.status, 200);
+    assert.ok(allowed.includes("x-project"));
+  });
+
   test("rejects invalid/missing auth, media type and malformed JSON before upstream", async () => {
     for (const badHeaders of [
       { "X-Security-Key": "" },
