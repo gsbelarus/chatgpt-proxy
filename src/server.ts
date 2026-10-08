@@ -1497,7 +1497,7 @@ export const server = http.createServer(async (req, res) => {
   if (pathname === "/v1/responses") {
     res.setHeader(
       "Access-Control-Allow-Headers",
-      "Origin, X-Requested-With, Content-Type, Accept, X-Request-Id, Authorization, X-Security-Key, OpenAI-Project, OpenAI-Organization, User-Agent, X-Stainless-Lang, X-Stainless-Package-Version, X-Stainless-OS, X-Stainless-Arch, X-Stainless-Runtime, X-Stainless-Runtime-Version, X-Stainless-Retry-Count, X-Stainless-Timeout",
+      "Origin, X-Requested-With, Content-Type, Accept, X-Request-Id, Authorization, X-Security-Key, OpenAI-Project, OpenAI-Organization, X-Project, User-Agent, X-Stainless-Lang, X-Stainless-Package-Version, X-Stainless-OS, X-Stainless-Arch, X-Stainless-Runtime, X-Stainless-Runtime-Version, X-Stainless-Retry-Count, X-Stainless-Timeout",
     );
     res.setHeader(
       "Access-Control-Expose-Headers",

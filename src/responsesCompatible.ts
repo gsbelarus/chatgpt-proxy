@@ -154,7 +154,7 @@ export async function handleCompatibleResponses(
     const openai = createOpenAIClient(
       {
         openai_api_key: apiKey,
-        project: header(req, "openai-project"),
+        project: header(req, "openai-project") ?? header(req, "x-project"),
         organization: header(req, "openai-organization"),
       },
       context,
