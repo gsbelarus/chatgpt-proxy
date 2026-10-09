@@ -84,11 +84,59 @@ async function writeEvent(
   }
 }
 
-// Error diagnostics may contain an echo of the document. Keep them out of logs.
+// Never log free-form upstream text: it can echo documents or credentials.
+// Recognize common diagnostics, but emit only constant descriptions.
+function diagnosticMessage(value: unknown): string {
+  if (typeof value !== "string" || value.length > 16_384)
+    return "Upstream API request failed (message withheld)";
+  const reasons: [RegExp, string][] = [
+    [
+      /unsupported.{0,40}(file|format|extension)|(file|format|extension).{0,80}(not supported|unsupported)|invalid file format/i,
+      "Unsupported file format",
+    ],
+    [
+      /(invalid|malformed).{0,40}base64|base64.{0,40}(invalid|malformed)/i,
+      "Invalid Base64 file data",
+    ],
+    [
+      /(file|document).{0,80}(too large|size limit|exceeds|maximum size)/i,
+      "File size limit exceeded",
+    ],
+    [
+      /(unable|failed|cannot|could not).{0,40}(parse|read|process).{0,40}(file|document)/i,
+      "File could not be processed",
+    ],
+    [
+      /model.{0,80}(not found|does not exist|not supported|unsupported|access)/i,
+      "Model unavailable or unsupported",
+    ],
+    [
+      /(incorrect|invalid|missing).{0,30}(api key|authentication)/i,
+      "Authentication rejected",
+    ],
+    [
+      /(project|organization).{0,80}(access|permission|invalid|not found)/i,
+      "Project or organization access rejected",
+    ],
+    [/rate limit/i, "Rate limit exceeded"],
+    [/quota/i, "Quota error"],
+  ];
+  return (
+    reasons.find(([pattern]) => pattern.test(value))?.[1] ??
+    "Upstream API request failed (message withheld)"
+  );
+}
+
 function safeApiError(error: APIError): APIError {
+  const detail = error.error as { message?: unknown } | undefined;
   return new OpenAI.APIError(
     error.status,
-    { message: "Upstream API request failed" },
+    {
+      message: diagnosticMessage(detail?.message),
+      type: errorField(error.type),
+      code: errorField(error.code),
+      param: errorField(error.param),
+    },
     undefined,
     error.headers,
   );
@@ -175,11 +223,13 @@ export async function handleCompatibleResponses(
         handleRequestError(
           context,
           res,
-          new OpenAI.APIError(
-            undefined,
-            { message: "Upstream response failed" },
-            undefined,
-            upstream.headers,
+          safeApiError(
+            new OpenAI.APIError(
+              undefined,
+              response.error ?? { message: "Upstream response failed" },
+              undefined,
+              upstream.headers,
+            ),
           ),
         );
       } else {
@@ -215,6 +265,7 @@ export async function handleCompatibleResponses(
     heartbeat.unref();
     let terminal: ModelResponse | undefined;
     let failed = false;
+    let streamError: unknown;
     for await (const event of stream) {
       const outgoing =
         hasInlineFiles && event.type === "error"
@@ -243,6 +294,7 @@ export async function handleCompatibleResponses(
       }
       if (event.type === "error") {
         failed = true;
+        streamError = event;
         break;
       }
     }
@@ -260,11 +312,14 @@ export async function handleCompatibleResponses(
       handleRequestError(
         context,
         res,
-        new OpenAI.APIError(
-          undefined,
-          { message: "Upstream response failed" },
-          undefined,
-          upstream.headers,
+        safeApiError(
+          new OpenAI.APIError(
+            undefined,
+            streamError ??
+              terminal?.error ?? { message: "Upstream response failed" },
+            undefined,
+            upstream.headers,
+          ),
         ),
       );
     } else {
@@ -324,8 +379,11 @@ export async function handleCompatibleResponses(
       !res.writableEnded
     ) {
       const classified = classifyProxyError(safeError, context);
+      const message = isApiFailure
+        ? "Upstream API request failed"
+        : classified.message;
       res.end(
-        `event: error\ndata: ${JSON.stringify({ type: "error", code: classified.code, message: classified.message, param: null })}\n\n`,
+        `event: error\ndata: ${JSON.stringify({ type: "error", code: classified.code, message, param: null })}\n\n`,
       );
     }
     handleRequestError(context, res, safeError);
