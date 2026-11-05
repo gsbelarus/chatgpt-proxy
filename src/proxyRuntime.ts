@@ -1264,6 +1264,7 @@ type UpstreamErrorDetails = {
   requestId?: string | null;
   type?: string | null;
   code?: string | null;
+  param?: string | null;
 };
 
 export type ClassifiedProxyError = {
@@ -1457,6 +1458,9 @@ export function classifyProxyError(
         requestId: error.requestID ?? context.openaiRequestId ?? null,
         type: error.type ?? null,
         code: error.code ?? null,
+        ...(context.endpoint === "/v1/responses"
+          ? { param: error.param ?? null }
+          : {}),
       },
       suppressResponse: false,
     };
