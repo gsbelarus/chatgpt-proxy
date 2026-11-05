@@ -128,6 +128,17 @@ Default values:
 - maximum parallel requests: `32`
 - SSE keep-alive interval: `15000` ms
 
+### MCP OAuth client metadata
+
+`GET /mcp/oauth/client-metadata?provider=openai&path=/oauth/codex/client.json`
+relays a public OAuth client metadata document. Send `X-Security-Key` using the
+existing `SECURITY_KEY`. The proxy accepts only known OpenAI metadata paths on
+`chatgpt.com` and the Claude Web/Desktop and Claude Code metadata paths on
+`claude.ai` (`provider=claude`). It does not follow redirects or forward caller
+headers. Responses are limited to 64 KiB with a 3.5-second upstream deadline.
+The upstream cache policy is returned in `X-MCP-Metadata-Cache-Control` for
+the authorization server; the proxy response itself is marked `no-store`.
+
 ## Running
 
 **Development (with hot reload):**

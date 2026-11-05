@@ -5,6 +5,7 @@ import http from "http";
 import OpenAI, { toFile } from "openai";
 import Anthropic from "@anthropic-ai/sdk";
 import Busboy from "busboy";
+import { handleClientMetadata } from "./clientMetadata.js";
 import { AudioResponseFormat } from "openai/resources";
 import type { ChatCompletionCreateParamsNonStreaming } from "openai/resources/chat/completions";
 import type {
@@ -1512,6 +1513,11 @@ export const server = http.createServer(async (req, res) => {
   }
 
   req.setTimeout(proxyConfig.serverTimeoutMs);
+
+  if (pathname === "/mcp/oauth/client-metadata") {
+    await handleClientMetadata(req, res, urlObj.searchParams);
+    return;
+  }
 
   if (pathname === "/") {
     res.writeHead(200, { "Content-Type": "text/html" });
